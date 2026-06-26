@@ -98,7 +98,11 @@ static int sweep() {
     IPAddress ip(me[0], me[1], me[2], host);
     bool self = (ip == me);
     int rtt = -1; bool arped = false;
-    if (!self) for (int i = 0; i < PROBE_ATTEMPTS; i++) {  // retry to ride out dropped packets
+    // Empty IPs are the bulk of a /24 and dominate sweep time, so probe a never-seen address only
+    // once (one probe is enough to discover a new host). An address we've seen before gets the full
+    // retry budget to ride out dropped packets — that's where retries actually pay off.
+    int attempts = lastSeen[host] ? PROBE_ATTEMPTS : 1;
+    if (!self) for (int i = 0; i < attempts; i++) {
       rtt = pingHost(ip);                                 // the ping resolves ARP internally (the proper,
       arped = arpKnown(ip);                               // thread-safe path); then we read the ARP table
       if (rtt >= 0 || arped) break;                       // found -> stop retrying
