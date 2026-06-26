@@ -1,20 +1,23 @@
 // NetScan — an hourly "seen any sign of life lately" map of the local /24, scanned from the device.
 //
-// Once an hour the reTerminal wakes, sweeps its own subnet, and shows a grid of .1–.254: a cell
-// with its octet = that host has been seen recently; a solid black block = not seen. Results stream
-// in live — each grid row is partial-refreshed as it resolves (and each host is logged to serial the
-// instant it answers), so you watch the map fill in rather than waiting for the whole sweep. When the
-// sweep finishes it does ONE clean full refresh (to wipe partial-refresh ghosting) and then deep-sleeps
-// for the rest of the hour. E-paper holds the image with the power off, so the wall display stays lit.
+// Once an hour the reTerminal wakes, sweeps its own subnet, draws the result, does one clean full
+// refresh, and deep-sleeps for the rest of the hour (e-paper holds the image with the power off).
+//
+// TWO display modes — press the front REFRESH button any time to toggle (it wakes the device,
+// flips the mode, re-renders instantly, and goes back to sleep; the choice persists in RTC):
+//   * LABELED  — each cell shows its octet if the host has been seen within SEEN_WINDOW_SCANS
+//                sweeps (24 ~= 24 h), or a solid black block if not. Results stream in live: each
+//                host logs to serial on answer and each grid row is partial-refreshed as it resolves.
+//   * HEATMAP  — a 4-level-gray recency map: the longer since a host was last seen, the darker its
+//                block, in 2-hour steps (<2h white, 2-4h light, 4-6h dark, >=6h black). Grayscale
+//                only renders on a full refresh, so heatmap mode skips the per-row partials and
+//                paints once at the end-of-sweep full refresh. Serial still streams live.
 //
 // Detection uses both ICMP and ARP: each host gets a ping (1 s timeout so slow responders aren't
 // missed), and because a host can ignore ICMP yet still answer the ARP the ping triggers, the ARP
 // table is also checked (etharp_find_addr — stable entries only, so no false positives). Both use
-// only the ESP32 core (lwIP).
-//
-// The "seen" window is measured in SCANS, not wall-clock: a host stays marked until it's been quiet
-// for SEEN_WINDOW_SCANS consecutive hourly sweeps (24 = ~24 h). The per-host state lives in RTC
-// memory so it survives deep sleep; it resets only on a cold power-up.
+// only the ESP32 core (lwIP). Per-host state lives in RTC memory so it survives deep sleep; it
+// resets only on a cold power-up.
 //
 // Fill in WIFI_SSID/WIFI_PASS. Needs Adafruit GFX. Board: XIAO_ESP32S3, OPI PSRAM, CDC On Boot.
 #include <WiFi.h>
@@ -37,8 +40,10 @@ const uint32_t WIFI_FAIL_SLEEP_US = 300UL * 1000000;  // couldn't join WiFi -> r
 const uint32_t PING_TIMEOUT_MS = 1000;     // generous per-host wait so slow responders aren't missed.
                                            // Alive hosts answer fast; only dead hosts cost the full
                                            // second, so a full /24 sweep takes a few minutes.
-// A host stays "seen" until it's been quiet for this many consecutive hourly sweeps (24 ~= 24 h).
+// LABELED mode: a host stays "seen" until it's been quiet this many consecutive sweeps (24 ~= 24 h).
 const uint32_t SEEN_WINDOW_SCANS = 24;
+// HEATMAP mode: scans (~hours) per darkness step. 4 levels over 3 steps -> black after ~6 h.
+const uint32_t HEAT_STEP_SCANS = 2;
 const int PROBE_ATTEMPTS = 2;             // retry each host this many times — catches dropped packets
                                           // on a lossy WiFi link
 
@@ -52,10 +57,20 @@ GFXcanvas1 canvas(PANEL_W, PANEL_H);
 // --- state that must survive deep sleep: lives in RTC memory, zeroed only on a cold power-up ---
 RTC_DATA_ATTR uint32_t scanIndex;            // sweeps since cold boot (1-based once scanning starts)
 RTC_DATA_ATTR uint32_t lastSeenScan[256];    // scanIndex of each octet's last sighting (0 = never)
+RTC_DATA_ATTR bool heatmapMode;              // false = labeled grid, true = 4-level recency heatmap
+RTC_DATA_ATTR uint8_t gNet[3];               // our /24 base (so we can label the map without WiFi)
 
-// Has this octet shown a sign of life within the window? (windowed by scan count, not millis)
+// Has this octet shown a sign of life within the labeled-mode window? (windowed by scan count)
 static bool seen(int host) {
   return lastSeenScan[host] && (scanIndex - lastSeenScan[host]) < SEEN_WINDOW_SCANS;
+}
+
+// Heatmap shade for an octet: 3 (white, freshest) .. 0 (black, stale/never), stepping every
+// HEAT_STEP_SCANS sweeps. Never-seen -> black.
+static uint8_t heatLevel(int host) {
+  if (!lastSeenScan[host]) return 0;
+  uint32_t idx = (scanIndex - lastSeenScan[host]) / HEAT_STEP_SCANS;
+  return idx >= 3 ? 0 : (uint8_t)(3 - idx);
 }
 
 // ---- one synchronous ICMP ping via the lwIP ping_sock session API ----
@@ -102,55 +117,86 @@ static bool arpKnown(IPAddress ip) {
   return found;
 }
 
-// ---- drawing (into the 1-bit canvas, then blitted to the gray framebuffer 1->black, 0->white) ----
+// ---- drawing ----
+// The 1-bit canvas holds chrome/outlines/text (blitted to the gray buffer as 1->black, 0->white).
+// Gray SHADES can't live in the 1-bit canvas, so heatmap fills are written straight to the buffer.
 static void blit(int x, int y, int w, int h) {
   uint8_t* fb = epd.buffer();
   for (int yy = y; yy < y + h && yy < PANEL_H; yy++)
     for (int xx = x; xx < x + w && xx < PANEL_W; xx++)
       fb[yy * PANEL_W + xx] = canvas.getPixel(xx, yy) ? 0 : 3;
 }
+static void fbFill(int x, int y, int w, int h, uint8_t gray) {
+  uint8_t* fb = epd.buffer();
+  for (int yy = y; yy < y + h && yy < PANEL_H; yy++)
+    for (int xx = x; xx < x + w && xx < PANEL_W; xx++)
+      fb[yy * PANEL_W + xx] = gray;
+}
 
-// One grid cell: octet on white if seen lately, solid black block if not.
+// One grid cell. LABELED: octet on white if seen, else black block. HEATMAP: interior shaded by recency.
 static void drawCell(int host) {
   int i = host - 1, cx = GX0 + (i % COLS) * CW, cy = GY0 + (i / COLS) * CH;
   canvas.fillRect(cx + 1, cy + 1, CW - 4, CH - 4, 0);                    // clear interior to white
   canvas.drawRect(cx, cy, CW - 2, CH - 2, 1);                            // cell outline
-  if (!seen(host)) canvas.fillRect(cx + 2, cy + 2, CW - 6, CH - 6, 1);   // not seen lately -> black block
-  else { canvas.setTextSize(1); canvas.setCursor(cx + 4, cy + 8); canvas.print(host); }
-  blit(cx, cy, CW - 2, CH - 2);
+  if (heatmapMode) {
+    blit(cx, cy, CW - 2, CH - 2);                                        // push outline + white interior
+    fbFill(cx + 2, cy + 2, CW - 6, CH - 6, heatLevel(host));             // overwrite interior with shade
+  } else {
+    if (!seen(host)) canvas.fillRect(cx + 2, cy + 2, CW - 6, CH - 6, 1); // not seen lately -> black block
+    else { canvas.setTextSize(1); canvas.setCursor(cx + 4, cy + 8); canvas.print(host); }
+    blit(cx, cy, CW - 2, CH - 2);
+  }
 }
 
-// The top-right status line ("N seen 24h  batt X%"); redrawn as the running count climbs.
-static void drawStatus(int count) {
+// Top-right status line: "N active  batt X%" (heatmap, <6h) or "N seen 24h  batt X%" (labeled).
+static void drawStatus() {
+  int count = 0;
+  if (heatmapMode) { for (int h = 1; h <= 254; h++) if (heatLevel(h)) count++; }
+  else             { for (int h = 1; h <= 254; h++) if (seen(h))      count++; }
   canvas.fillRect(500, 52, PANEL_W - 508, 22, 0);
   canvas.setTextColor(1); canvas.setTextSize(2); canvas.setCursor(520, 58);
-  canvas.printf("%d seen 24h  batt %d%%", count, io.batteryPercent());
+  canvas.printf("%d %s  batt %d%%", count, heatmapMode ? "active" : "seen 24h", io.batteryPercent());
   blit(500, 52, PANEL_W - 500, 24);
 }
 
-static int seenCount() { int n = 0; for (int h = 1; h <= 254; h++) if (seen(h)) n++; return n; }
+// HEATMAP legend: four swatches (fresh -> stale) with end labels. Outlines/labels into the canvas;
+// the gray fills are applied to the buffer after the header is blitted.
+static const int LEG_X = 300, LEG_Y = 54, LEG_SW = 22, LEG_GAP = 6, LEG_H = 18;
+static void drawLegendCanvas() {
+  for (int k = 0; k < 4; k++) canvas.drawRect(LEG_X + k * (LEG_SW + LEG_GAP), LEG_Y, LEG_SW, LEG_H, 1);
+  canvas.setTextSize(1);
+  canvas.setCursor(LEG_X, LEG_Y + LEG_H + 2); canvas.print("now");
+  canvas.setCursor(LEG_X + 3 * (LEG_SW + LEG_GAP) - 6, LEG_Y + LEG_H + 2); canvas.print("6h+");
+}
+static void drawLegendShades() {
+  const uint8_t sh[4] = {3, 2, 1, 0};
+  for (int k = 0; k < 4; k++)
+    fbFill(LEG_X + k * (LEG_SW + LEG_GAP) + 1, LEG_Y + 1, LEG_SW - 2, LEG_H - 2, sh[k]);
+}
 
-// Static chrome + every cell at the current scanIndex, blitted to the framebuffer (no refresh).
+// Full frame from current state into the buffer (no panel refresh). Header band is blitted first so
+// the per-cell heatmap shades (written straight to the buffer) aren't clobbered by a later canvas blit.
 static void renderAll() {
   canvas.fillScreen(0);
   canvas.setTextColor(1);
   canvas.setTextSize(3); canvas.setCursor(20, 12); canvas.print("reTerminal E1001");
   canvas.setTextSize(2); canvas.setCursor(596, 18); canvas.print("Seeed Studio");
   canvas.drawFastHLine(20, 46, PANEL_W - 40, 2);
-  IPAddress me = WiFi.localIP();
-  canvas.setTextSize(2); canvas.setCursor(20, 58); canvas.printf("SUBNET %d.%d.%d.x", me[0], me[1], me[2]);
+  canvas.setTextSize(2); canvas.setCursor(20, 58); canvas.printf("SUBNET %d.%d.%d.x", gNet[0], gNet[1], gNet[2]);
+  if (heatmapMode) drawLegendCanvas();
+  blit(0, 0, PANEL_W, GY0);                 // header band (everything above the grid)
+  if (heatmapMode) drawLegendShades();      // legend grays go in after the header blit
+  drawStatus();
   for (int host = 1; host <= 254; host++) drawCell(host);
-  drawStatus(seenCount());
-  blit(0, 0, PANEL_W, PANEL_H);
 }
 
-// One full sweep. Streams results: each host -> serial immediately, each completed grid row ->
-// a partial refresh, the running "seen" count -> the header.
+// One full sweep. Streams each host to serial on answer; in LABELED mode also partial-refreshes each
+// completed grid row (HEATMAP shades need a full refresh, so it paints once when the sweep finishes).
 static int sweep() {
   IPAddress me = WiFi.localIP();
   int passCount = 0, maxRtt = 0, slowHost = 0;
-  Serial.printf("\n[netscan] sweep #%lu of %d.%d.%d.x  (P<ms>=ping  A=arp  *=self)\n",
-                (unsigned long)scanIndex, me[0], me[1], me[2]);
+  Serial.printf("\n[netscan] sweep #%lu of %d.%d.%d.x  [%s]  (P<ms>=ping  A=arp  *=self)\n",
+                (unsigned long)scanIndex, me[0], me[1], me[2], heatmapMode ? "heatmap" : "labeled");
   for (int host = 1; host <= 254; host++) {
     IPAddress ip(me[0], me[1], me[2], host);
     bool self = (ip == me);
@@ -171,62 +217,76 @@ static int sweep() {
       else               Serial.printf("[netscan] .%d A\n", host);         // ARP only (ICMP blocked)
     }
     drawCell(host);                                       // reflect this host in the framebuffer now
-    if (host % COLS == 0 || host == 254) {                // row complete -> push it + the count to glass
-      drawStatus(seenCount());
-      epd.refreshChanged(0);                              // partial-refresh just the changed band(s)
+    if (host % COLS == 0 || host == 254) {                // row complete
+      drawStatus();
+      if (!heatmapMode) epd.refreshChanged(0);            // labeled: partial-refresh the changed band(s)
     }
   }
-  int n = seenCount();
+  int n = 0; for (int h = 1; h <= 254; h++) if (seen(h)) n++;
   Serial.printf("[netscan] sweep #%lu done: this pass %d, seen %d, slowest %dms (.%d)\n",
                 (unsigned long)scanIndex, passCount, n, maxRtt, slowHost);
   return n;
 }
 
-static void deepSleepUs(uint64_t us) {
-  Serial.printf("[netscan] sleeping %.1f min\n", us / 60.0e6);
+static void deepSleep(uint64_t us) {
+  Serial.printf("[netscan] sleeping %.1f min (press REFRESH to toggle heatmap)\n", us / 60.0e6);
   Serial.flush();
   epd.sleep();                                            // power the panel down (image is retained)
   esp_sleep_enable_timer_wakeup(us);
+  esp_sleep_enable_ext1_wakeup(1ULL << PIN_BTN_REFRESH, ESP_EXT1_WAKEUP_ALL_LOW);  // REFRESH (GPIO3, active-low)
   esp_deep_sleep_start();                                 // <- does not return; wakes back into setup()
 }
 
 void setup() {
   Serial.begin(115200); delay(200);
   uint32_t t0 = millis();
-  bool wokeFromSleep = (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER);
-  if (!wokeFromSleep) {                                   // cold power-up: no history, glass unknown
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  bool wokeTimer  = (cause == ESP_SLEEP_WAKEUP_TIMER);
+  bool wokeButton = (cause == ESP_SLEEP_WAKEUP_EXT1);
+  if (!wokeTimer && !wokeButton) {                        // cold power-up: no history, glass unknown
     memset(lastSeenScan, 0, sizeof(lastSeenScan));
-    scanIndex = 0;
+    scanIndex = 0; heatmapMode = false; gNet[0] = gNet[1] = gNet[2] = 0;
   }
 
   io.begin();
-  if (!epd.begin()) { Serial.println("PSRAM alloc failed — enable OPI PSRAM"); deepSleepUs(MIN_SLEEP_US); }
-  epd.setFullEvery(0);                        // we manage full refreshes by hand (one per sweep)
+  if (!epd.begin()) { Serial.println("PSRAM alloc failed — enable OPI PSRAM"); deepSleep(MIN_SLEEP_US); }
+  epd.setFullEvery(0);                        // we manage full refreshes by hand
+
+  if (wokeButton) {                           // REFRESH pressed -> flip mode, re-render now, no rescan
+    heatmapMode = !heatmapMode;
+    io.beep();
+    Serial.printf("[netscan] mode -> %s\n", heatmapMode ? "HEATMAP" : "labeled");
+    renderAll();
+    epd.displayFull();                        // instant grayscale/labeled switch from existing data
+    uint32_t tr = millis();                   // wait for release so we don't immediately wake again
+    while (digitalRead(PIN_BTN_REFRESH) == LOW && millis() - tr < 3000) delay(10);
+    deepSleep(CYCLE_US);                       // resume the hourly cadence from now
+  }
 
   WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASS);
   for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("\nwifi FAILED — back to sleep, retry next cycle");
-    deepSleepUs(WIFI_FAIL_SLEEP_US);
+    deepSleep(WIFI_FAIL_SLEEP_US);
   }
   Serial.println("\nwifi up");
+  IPAddress me = WiFi.localIP(); gNet[0] = me[0]; gNet[1] = me[1]; gNet[2] = me[2];
 
   // Bring the framebuffer to the last-known image. On a timer wake the panel still physically shows
-  // it (retained through deep sleep), so we just sync the snapshot — no flash. On a cold boot the
-  // glass is unknown, so we full-refresh to establish a clean base.
+  // it (retained through deep sleep), so we sync the snapshot — no flash. Cold boot full-refreshes.
   renderAll();
-  if (wokeFromSleep) epd.syncSnapshot();
-  else               epd.displayFull();
+  if (wokeTimer) epd.syncSnapshot();
+  else           epd.displayFull();
 
   scanIndex++;                               // this sweep's index (after reconstructing the prior frame)
-  sweep();                                   // streams: short partials per row + per-host serial
+  sweep();                                   // streams results (labeled mode also partials per row)
 
-  epd.displayFull();                         // the one "big" refresh — wipes partial ghosting before the long idle
+  epd.displayFull();                         // the one "big" refresh — paints the heatmap / clears ghosting
 
   // Sleep out the rest of the hour (wake-to-wake ~= CYCLE_US), floored so a long sweep can't busy-loop.
   uint64_t elapsedUs = (uint64_t)(millis() - t0) * 1000;
   uint64_t sleepUs = elapsedUs < CYCLE_US - MIN_SLEEP_US ? CYCLE_US - elapsedUs : MIN_SLEEP_US;
-  deepSleepUs(sleepUs);
+  deepSleep(sleepUs);
 }
 
 void loop() {}   // never runs — setup() ends in deep sleep and wakes back into setup()
