@@ -23,6 +23,7 @@
 #include <WiFi.h>
 #include <Adafruit_GFX.h>
 #include "esp_sleep.h"
+#include "driver/rtc_io.h"   // rtc_gpio_* — configure the button pad as an ext0 deep-sleep wake source
 #include "ping/ping_sock.h"
 #include "lwip/ip_addr.h"
 #include "lwip/etharp.h"
@@ -233,7 +234,12 @@ static void deepSleep(uint64_t us) {
   Serial.flush();
   epd.sleep();                                            // power the panel down (image is retained)
   esp_sleep_enable_timer_wakeup(us);
-  esp_sleep_enable_ext1_wakeup(1ULL << PIN_BTN_REFRESH, ESP_EXT1_WAKEUP_ALL_LOW);  // REFRESH (GPIO3, active-low)
+  // REFRESH button (GPIO3, RTC-capable, active-low) wakes us to toggle the display mode. ext0 is the
+  // single-pad wake source; enable the pad's RTC pull-up so it reads HIGH until the button grounds it.
+  rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_REFRESH);
+  rtc_gpio_pulldown_dis((gpio_num_t)PIN_BTN_REFRESH);
+  esp_err_t e = esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_BTN_REFRESH, 0);  // 0 = wake when it goes low
+  if (e != ESP_OK) Serial.printf("[netscan] WARN ext0 wake enable failed: %d\n", (int)e);
   esp_deep_sleep_start();                                 // <- does not return; wakes back into setup()
 }
 
@@ -241,8 +247,9 @@ void setup() {
   Serial.begin(115200); delay(200);
   uint32_t t0 = millis();
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  Serial.printf("[netscan] boot — wake cause = %d (2=ext0/button, 4=timer, 0=cold)\n", (int)cause);
   bool wokeTimer  = (cause == ESP_SLEEP_WAKEUP_TIMER);
-  bool wokeButton = (cause == ESP_SLEEP_WAKEUP_EXT1);
+  bool wokeButton = (cause == ESP_SLEEP_WAKEUP_EXT0);
   if (!wokeTimer && !wokeButton) {                        // cold power-up: no history, glass unknown
     memset(lastSeenScan, 0, sizeof(lastSeenScan));
     scanIndex = 0; heatmapMode = false; gNet[0] = gNet[1] = gNet[2] = 0;
