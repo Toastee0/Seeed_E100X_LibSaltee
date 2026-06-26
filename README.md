@@ -84,6 +84,7 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **ThinClient** | fetch an 800×480 gray frame from *your* server and partial-refresh only what changed — render server-side, change the UI with no reflash. |
 | **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
 | **NetScan** | ICMP ping-sweep of the device's own /24 (no extra library) → a live grid of which hosts are up, partial-refreshed. |
+| **PCMonitor** | parse a Windows PC's **LibreHardwareMonitor** JSON on-device → live CPU/GPU temps, partial-refreshed. See [`docs/PC_MONITOR.md`](docs/PC_MONITOR.md). |
 | **WiFiQR** | a "scan to join my WiFi" QR, generated **on-device** from the credentials it already knows (`WiFi.SSID()`/`WiFi.psk()`) — uses the ESP32 core's built-in QR encoder, no extra library. |
 | **WiFiSetup** | **no-code, no-serial onboarding**: captive-portal WiFi setup with on-screen status + a QR to join the device's setup hotspot. Hold Refresh at boot to re-provision. |
 
@@ -102,6 +103,10 @@ through the long colour refresh.
   `esptool` command line, or the Arduino IDE — for people who've never used an ESP32.
 - [`docs/SERVER.md`](docs/SERVER.md) — a complete copy-paste server for the **ThinClient** example
   (exact Python version + install, and why).
+- [`docs/PC_MONITOR.md`](docs/PC_MONITOR.md) — show a Windows PC's CPU/GPU temps: set up
+  **LibreHardwareMonitor**, then either parse its JSON on-device or render via a small Python app.
+- [`docs/HOME_ASSISTANT.md`](docs/HOME_ASSISTANT.md) — pull **Home Assistant** entities (token +
+  REST API) and render them to the panel.
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) — pin map, peripherals, and the gotchas worth knowing.
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the simple raw-frame format used by ThinClient.
 - [`SKILLS.md`](SKILLS.md) — orientation for AI coding agents (and a quick architecture tour).
