@@ -35,7 +35,7 @@ static void show(const String& ssid, const String& psk, const String& note) {
   if (psk.length()) {
     char payload[160];
     ReTerminal::wifiQRPayload(payload, sizeof(payload), ssid.c_str(), psk.c_str(), "WPA");
-    int n = ReTerminal::drawQR(fb, epd.width(), payload, 380, 150, 380, 280);
+    int n = ReTerminal::drawQR(fb, epd.width(), payload, 380, 132, 380, 280);
     Serial.printf("QR: %s  (%d modules)\n", payload, n);
   }
   epd.displayFull();
