@@ -1,0 +1,129 @@
+<!doctype html>
+<!-- setup.html — generate a config.h for the PCMonitorConfig example, no C editing.
+     Part of reterminal-epaper (GPL-3.0-or-later). Open this file in any browser; it works
+     fully offline. Paste your LibreHardwareMonitor /data.json, tick + place sensors, download. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>reTerminal — PC monitor setup</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:900px;margin:20px auto;padding:0 14px;color:#1b1b1b}
+  h1{font-size:1.4em} h2{font-size:1.1em;margin-top:1.6em;border-bottom:1px solid #ddd;padding-bottom:4px}
+  label{display:inline-block;min-width:120px} input,select,textarea{font-size:1em;padding:6px}
+  input[type=text],input[type=password],textarea{width:100%;box-sizing:border-box}
+  textarea{height:120px;font-family:monospace;font-size:.85em}
+  .row{display:flex;gap:8px;align-items:center;margin:4px 0;flex-wrap:wrap}
+  .row input[type=text]{width:auto;flex:1;min-width:90px} .num{width:64px!important;flex:none!important}
+  table{border-collapse:collapse;width:100%;margin:6px 0} td,th{border:1px solid #ddd;padding:4px 6px;font-size:.9em;text-align:left}
+  button{font-size:1em;padding:8px 14px;cursor:pointer} .small{padding:3px 8px;font-size:.85em}
+  #preview{border:1px solid #888;background:#fff;width:100%;max-width:800px;image-rendering:pixelated}
+  .muted{color:#777} .pick{max-height:240px;overflow:auto;border:1px solid #eee;padding:6px}
+  .pick div{padding:2px 0} #dl{background:#1a7f37;color:#fff;border:0;border-radius:6px;font-size:1.1em}
+</style>
+
+<h1>reTerminal &mdash; PC monitor setup</h1>
+<p class="muted">Pick which LibreHardwareMonitor readings to show and where, then download a
+<code>config.h</code> and drop it into the <code>PCMonitorConfig</code> example folder. No coding.</p>
+
+<h2>1. Connection</h2>
+<div class="row"><label>WiFi network</label><input id="ssid" type="text" placeholder="your-ssid"></div>
+<div class="row"><label>WiFi password</label><input id="pass" type="password" placeholder="your-password"></div>
+<div class="row"><label>LHM URL</label><input id="url" type="text" value="http://192.168.1.50:8085/data.json"></div>
+<div class="row"><label>Refresh (sec)</label><input id="refresh" class="num" type="number" value="5" min="1"></div>
+
+<h2>2. Load your sensors</h2>
+<p class="muted">On the PC, open <b>http://&lt;pc-ip&gt;:8085/data.json</b>, copy everything, and paste it here.
+(Browsers usually can't fetch it for you across the network, so paste is the reliable way.)</p>
+<textarea id="json" placeholder='Paste the contents of /data.json here…'></textarea>
+<div class="row"><button onclick="loadJson()">Load sensors</button><span id="loadmsg" class="muted"></span></div>
+<div class="pick" id="pick"></div>
+
+<h2>3. Layout</h2>
+<table id="items"><thead><tr><th>Sensor</th><th>Label</th><th>Unit</th><th>X</th><th>Y</th><th>Size</th><th></th></tr></thead><tbody></tbody></table>
+<canvas id="preview" width="800" height="480"></canvas>
+
+<h2>4. Download</h2>
+<p><button id="dl" onclick="download_()">⬇ Download config.h</button></p>
+<p class="muted">Put the downloaded <code>config.h</code> in
+<code>examples/PCMonitorConfig/</code> (replacing the one there), then compile &amp; flash.</p>
+
+<script>
+let sensors = [];           // {name,value,unit}
+let items = [];             // {sensor,label,unit,x,y,size}
+const $ = id => document.getElementById(id);
+
+function unitOf(v){ v=v||'';
+  if(/C(\b|$)/.test(v.replace('°','')) && /\d/.test(v)) return 'C';
+  if(v.includes('%')) return '%'; if(/MHz/.test(v)) return 'M';
+  if(/\bW\b/.test(v)) return 'W'; if(/RPM/.test(v)) return 'R'; if(/\bV\b/.test(v)) return 'V';
+  return 'C';
+}
+function walk(node, out){ if(!node) return;
+  const v = node.Value||''; if(node.Text && v && /\d/.test(v)) out.push({name:node.Text, value:v, unit:unitOf(v)});
+  (node.Children||[]).forEach(c=>walk(c,out));
+}
+function loadJson(){
+  try{ const t = JSON.parse($('json').value); sensors=[]; walk(t, sensors);
+    // de-dup by name+unit, keep first
+    const seen=new Set(); sensors=sensors.filter(s=>{const k=s.name+'|'+s.unit; if(seen.has(k))return false; seen.add(k); return true;});
+    $('loadmsg').textContent = sensors.length+' sensors found';
+    renderPick();
+  }catch(e){ $('loadmsg').textContent='Could not parse JSON — copy the whole /data.json'; }
+}
+function renderPick(){
+  $('pick').innerHTML = sensors.map((s,i)=>
+    `<div><label style="min-width:0"><input type="checkbox" onchange="toggle(${i},this.checked)"> `
+    +`<b>${s.name}</b> <span class="muted">= ${s.value}</span></label></div>`).join('');
+}
+function toggle(i,on){ const s=sensors[i];
+  if(on){ const n=items.length; items.push({sensor:s.name,label:s.name.slice(0,10),unit:s.unit,
+            x: 40 + (n%2)*390, y: 120 + Math.floor(n/2)*120, size:8}); }
+  else { const k=items.findIndex(it=>it.sensor===s.name && it.unit===s.unit); if(k>=0) items.splice(k,1); }
+  renderItems();
+}
+function renderItems(){
+  const tb=$('items').querySelector('tbody');
+  tb.innerHTML = items.map((it,i)=>`<tr>
+    <td>${it.sensor}</td>
+    <td><input type="text" value="${it.label}" onchange="upd(${i},'label',this.value)"></td>
+    <td><input class="num" value="${it.unit}" onchange="upd(${i},'unit',this.value)"></td>
+    <td><input class="num" type="number" value="${it.x}" onchange="upd(${i},'x',+this.value)"></td>
+    <td><input class="num" type="number" value="${it.y}" onchange="upd(${i},'y',+this.value)"></td>
+    <td><input class="num" type="number" value="${it.size}" min="1" max="12" onchange="upd(${i},'size',+this.value)"></td>
+    <td><button class="small" onclick="del(${i})">✕</button></td></tr>`).join('');
+  draw();
+}
+function upd(i,k,v){ items[i][k]=v; draw(); }
+function del(i){ items.splice(i,1); renderItems(); }
+function sval(it){ const s=sensors.find(x=>x.name===it.sensor && x.unit===it.unit) || sensors.find(x=>x.name===it.sensor); return s? (parseFloat(s.value)||0): 0; }
+function draw(){
+  const c=$('preview').getContext('2d'); c.fillStyle='#fff'; c.fillRect(0,0,800,480);
+  c.fillStyle='#000'; c.textBaseline='top';
+  c.font='24px monospace'; c.fillText('PC monitor',24,16);
+  items.forEach(it=>{ c.font='16px monospace'; c.fillText(it.label, it.x, it.y-22);
+    c.font=(8*it.size)+'px monospace'; c.fillText(sval(it)+it.unit, it.x, it.y); });
+}
+function esc(s){ return String(s).replace(/\\/g,'\\\\').replace(/"/g,'\\"'); }
+function genConfigH(){
+  const rows = items.map(it=>`  { "${esc(it.sensor)}", "${esc(it.label)}", ${it.x|0}, ${it.y|0}, ${it.size|0}, "${esc(it.unit)}" },`).join('\n');
+  return `// config.h — generated by extras/setup.html. Drop in examples/PCMonitorConfig/ and compile.
+#pragma once
+#include <stdint.h>
+
+#define CFG_WIFI_SSID  "${esc($('ssid').value)}"
+#define CFG_WIFI_PASS  "${esc($('pass').value)}"
+#define CFG_SOURCE_URL "${esc($('url').value)}"
+#define CFG_REFRESH_S  ${(+$('refresh').value)||5}
+
+struct CfgItem { const char* sensor; const char* label; int16_t x, y; uint8_t size; const char* unit; };
+static const CfgItem CFG_ITEMS[] = {
+${rows}
+};
+static const int CFG_ITEM_COUNT = sizeof(CFG_ITEMS) / sizeof(CFG_ITEMS[0]);
+`;
+}
+function download_(){
+  const blob=new Blob([genConfigH()],{type:'text/plain'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='config.h'; a.click();
+}
+draw();
+</script>
