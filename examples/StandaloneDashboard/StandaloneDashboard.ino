@@ -59,9 +59,11 @@ static void fetchWeather() {
 static void render(const struct tm& t) {
   canvas.fillScreen(0);                                  // 0 = white (we map drawn=black)
   canvas.setTextColor(1);
-  // clock
-  canvas.setTextSize(12); canvas.setCursor(24, 40);
-  char hm[8]; strftime(hm, sizeof(hm), "%H:%M", &t); canvas.print(hm);
+  // clock (centered)
+  char hm[8]; strftime(hm, sizeof(hm), "%H:%M", &t);
+  canvas.setTextSize(12);
+  int16_t bx, by; uint16_t bw, bh; canvas.getTextBounds(hm, 0, 0, &bx, &by, &bw, &bh);
+  canvas.setCursor((PANEL_W - bw) / 2, 40); canvas.print(hm);
   // date
   canvas.setTextSize(3); canvas.setCursor(28, 230);
   char d[32]; strftime(d, sizeof(d), "%A, %d %B %Y", &t); canvas.print(d);

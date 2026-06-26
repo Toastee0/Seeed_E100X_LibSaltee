@@ -43,6 +43,7 @@ constexpr uint8_t SHT4X_ADDR = 0x44;
 constexpr int PIN_BATTERY_ADC    = 1;
 constexpr int PIN_BATTERY_ENABLE = 21;
 constexpr float BATTERY_DIVIDER  = 2.0f;
+constexpr uint32_t BATTERY_CACHE_MS = 300000;   // re-read at most every 5 min (the read itself costs power)
 
 // ---- panel geometry (both 7.x" panels are 800x480 landscape) ----
 constexpr int PANEL_W = 800;

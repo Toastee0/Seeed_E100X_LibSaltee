@@ -30,10 +30,20 @@ WebServer web(80);
 DNSServer dns;
 String apName;
 
+// ---- a WiFi signal glyph: a base dot with three arcs fanning up over it ----
+static void drawWifi(int cx, int cy) {
+  canvas.fillCircle(cx, cy, 4, 1);
+  for (int r = 14; r <= 42; r += 14) {                  // top-half arcs (cornermask 0x3), 2 px thick
+    canvas.drawCircleHelper(cx, cy, r, 0x3, 1);
+    canvas.drawCircleHelper(cx, cy, r - 1, 0x3, 1);
+  }
+}
+
 // ---- draw a status screen: a big title, some body lines, and an optional QR on the right ----
 static void screen(const String& title, const String* lines, int nlines, const char* qr = nullptr) {
   canvas.fillScreen(0);
   canvas.setTextColor(1);
+  drawWifi(728, 64);                                     // WiFi glyph, top-right
   canvas.setTextSize(4); canvas.setCursor(30, 30); canvas.print(title);
   canvas.setTextSize(3);
   for (int i = 0; i < nlines; i++) { canvas.setCursor(30, 110 + i * 44); canvas.print(lines[i]); }

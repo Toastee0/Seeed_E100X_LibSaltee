@@ -16,21 +16,25 @@ void Peripherals::begin(bool powerMic) {
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 }
 
-float Peripherals::batteryVolts() {
+float Peripherals::batteryVolts(bool force) {
+  uint32_t now = millis();
+  if (!force && _battCache > 0 && (now - _battStamp) < BATTERY_CACHE_MS)
+    return _battCache;                                     // cached — don't power the divider again
   digitalWrite(PIN_BATTERY_ENABLE, HIGH);                  // power the divider
   delay(10);                                               // settle (Seeed: 10 ms before analogRead)
   uint32_t mv = analogReadMilliVolts(PIN_BATTERY_ADC);     // calibrated mV at the divider tap
   digitalWrite(PIN_BATTERY_ENABLE, LOW);                   // drop it again to save power
-  return (mv / 1000.0f) * BATTERY_DIVIDER;
+  _battCache = (mv / 1000.0f) * BATTERY_DIVIDER; _battStamp = now;
+  return _battCache;
 }
 
-uint8_t Peripherals::batteryPercent() {
+uint8_t Peripherals::batteryPercent(bool force) {
   // Piecewise-linear LiPo curve, anchored on Seeed's calibrate_linear (4.15 V -> 100 %, 3.27 -> 0).
   static const struct { float v; float pct; } CURVE[] = {
     {4.15f, 100}, {4.05f, 95}, {3.96f, 90}, {3.87f, 75}, {3.79f, 55},
     {3.70f, 40}, {3.60f, 25}, {3.50f, 12}, {3.40f, 5}, {3.27f, 0},
   };
-  float v = batteryVolts();
+  float v = batteryVolts(force);
   if (v >= CURVE[0].v) return 100;
   for (size_t i = 1; i < sizeof(CURVE) / sizeof(CURVE[0]); i++) {
     if (v >= CURVE[i].v) {

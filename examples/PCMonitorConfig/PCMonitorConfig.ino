@@ -45,6 +45,7 @@ static String findValue(const String& j, const char* name, const char* unit) {
 static void render(const String& j, bool ok) {
   canvas.fillScreen(0); canvas.setTextColor(1);
   canvas.setTextSize(3); canvas.setCursor(24, 16); canvas.print("PC monitor");
+  canvas.drawFastHLine(24, 56, PANEL_W - 48, 1);
   if (!ok) { canvas.setTextSize(3); canvas.setCursor(24, 110); canvas.print("Can't reach PC."); }
   else for (int i = 0; i < CFG_ITEM_COUNT; i++) {
     const CfgItem& it = CFG_ITEMS[i];

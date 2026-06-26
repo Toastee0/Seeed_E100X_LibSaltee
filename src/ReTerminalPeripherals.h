@@ -29,16 +29,18 @@ class Peripherals {
   bool readSHT4x(float& tempC, float& humidityPct);
 
   // ---- battery (2000 mAh LiPo) ----
-  // Enables the divider (GPIO21), settles, reads GPIO1 (12 dB), applies the 2.0 divider.
-  float batteryVolts();
+  // Reads are CACHED (BATTERY_CACHE_MS, 5 min) because enabling the divider draws current —
+  // calling these every frame would needlessly drain the battery. Pass force=true for a fresh read.
+  float batteryVolts(bool force = false);
   // Battery state of charge 0..100 %, from a LiPo discharge curve (Seeed calibration anchors).
-  uint8_t batteryPercent();
+  uint8_t batteryPercent(bool force = false);
 
  private:
   bool pressedEdge(int pin, bool& lastHigh);
   static uint8_t crc8(const uint8_t* d, int n);
 
   bool _lastRefresh = true, _lastLeft = true, _lastRight = true;    // true = released (HIGH)
+  float _battCache = -1.0f; uint32_t _battStamp = 0;               // cached battery volts + timestamp
 };
 
 }  // namespace ReTerminal

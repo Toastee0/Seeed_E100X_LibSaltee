@@ -46,7 +46,8 @@ def render(view: int) -> bytes:
     now = datetime.datetime.now()
     d.text((40, 60),  now.strftime("%H:%M:%S"), fill=0, font=f_big)
     d.text((40, 260), now.strftime("%A, %d %B %Y"), fill=0, font=f_med)
-    d.text((40, 340), f"view {view} — edit frameserver.py to change me", fill=80, font=f_med)
+    d.text((40, 340), f"view {view} - edit frameserver.py", fill=80, font=f_med)
+    d.text((40, 388), "to change what's shown here", fill=80, font=f_med)
     # quantise 0..255 -> 0..3 (0=black .. 3=white), the format the device expects
     q = img.point(lambda p: (p * 3 + 127) // 255)
     return q.tobytes()                          # exactly 800*480 = 384000 bytes

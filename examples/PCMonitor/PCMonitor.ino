@@ -43,18 +43,21 @@ static float lhmTemp(const String& j, const char* name) {
   }
 }
 
+static void panel(int x, const char* label, float temp) {
+  canvas.drawRect(x, 92, 366, 320, 1);                 // bordered card
+  canvas.fillRect(x, 92, 366, 46, 1);                  // header strip (inverted)
+  canvas.setTextColor(0); canvas.setTextSize(4); canvas.setCursor(x + 16, 102); canvas.print(label);
+  canvas.setTextColor(1); canvas.setTextSize(11); canvas.setCursor(x + 40, 210);
+  if (isnan(temp)) canvas.print("--"); else { canvas.print(temp, 0); }
+  if (!isnan(temp)) { canvas.setTextSize(4); canvas.setCursor(x + 250, 230); canvas.print("\xF8""C"); }  // °C (GFX font)
+}
+
 static void render(float cpu, float gpu, bool ok) {
   canvas.fillScreen(0); canvas.setTextColor(1);
-  canvas.setTextSize(4); canvas.setCursor(30, 24); canvas.print("PC monitor");
-  if (!ok) { canvas.setTextSize(3); canvas.setCursor(30, 120); canvas.print("Can't reach PC."); }
-  else {
-    canvas.setTextSize(3); canvas.setCursor(40, 130);  canvas.print("CPU");
-    canvas.setTextSize(9); canvas.setCursor(40, 165);
-    if (isnan(cpu)) canvas.print("--"); else { canvas.print(cpu, 0); canvas.print("C"); }
-    canvas.setTextSize(3); canvas.setCursor(440, 130); canvas.print("GPU");
-    canvas.setTextSize(9); canvas.setCursor(440, 165);
-    if (isnan(gpu)) canvas.print("--"); else { canvas.print(gpu, 0); canvas.print("C"); }
-  }
+  canvas.setTextSize(4); canvas.setCursor(24, 20); canvas.print("PC monitor");
+  canvas.drawFastHLine(24, 74, PANEL_W - 48, 1);
+  if (!ok) { canvas.setTextSize(3); canvas.setCursor(24, 140); canvas.print("Can't reach PC."); }
+  else { panel(24, "CPU", cpu); panel(410, "GPU", gpu); }
   uint8_t* fb = epd.buffer();
   for (int y = 0; y < PANEL_H; y++)
     for (int x = 0; x < PANEL_W; x++)

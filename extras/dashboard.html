@@ -66,7 +66,7 @@ function defForType(t){
   if(t==='W_VALUE'){base.fmt='%.0f';base.scheme='lhm';base.size=8;base.w=300;base.h=90;}
   if(t==='W_TEXT'){base.scheme='clock';base.arg='%H:%M:%S';base.h=30;}
   if(t==='W_BLOCK'){base.scheme='static';base.arg='Hello reTerminal';base.fast=false;base.h=120;}
-  if(t==='W_QR'){base.scheme='static';base.arg='https://example.com';base.fast=false;base.w=180;base.h=180;base.size=0;}
+  if(t==='W_QR'){base.scheme='static';base.arg='https://github.com/Toastee0/Seeed_E100X_LibSaltee';base.fast=false;base.w=180;base.h=180;base.size=0;}
   return base;
 }
 function add(t){items.push(defForType(t));renderRows();}

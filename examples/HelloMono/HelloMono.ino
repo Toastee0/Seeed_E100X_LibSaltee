@@ -1,45 +1,46 @@
-// HelloMono — Seeed reTerminal E1001 (mono) quickstart, no external libraries.
+// HelloMono — Seeed reTerminal E1001 (mono) quickstart.
 //
-// Shows the two things this panel does well: a 4-level GRAYSCALE full refresh, then a fast
-// 1-bit PARTIAL refresh of a small region (a block that steps across the screen ~every 2 s
-// without redrawing the rest).
+// Shows the two things this panel does well: a 4-level GRAYSCALE base (a gradient strip), and a
+// fast 1-bit PARTIAL refresh — a block that steps across a white band every ~2 s without
+// redrawing the rest. The title is drawn with Adafruit_GFX.
 //
-// Board: "XIAO_ESP32S3", with PSRAM = "OPI PSRAM" and "USB CDC On Boot = Enabled" set so the
-// 800x480 framebuffers fit and Serial reaches the on-board CH340.
+// Board: "XIAO_ESP32S3", PSRAM = "OPI PSRAM", "USB CDC On Boot = Enabled".
+#include <Adafruit_GFX.h>
 #include <ReTerminalMono.h>
 
 ReTerminal::Mono epd;
+GFXcanvas1 canvas(ReTerminal::PANEL_W, ReTerminal::PANEL_H);
 int blockX = 0;
+const int STRIP_Y = 120, STRIP_H = 44;       // white band the block moves along
 
-// Paint a horizontal greyscale gradient + labels directly into the working buffer (0..3).
-static void drawGradient() {
+static void drawBase() {
   uint8_t* fb = epd.buffer();
   const int W = epd.width(), H = epd.height();
-  for (int y = 0; y < H; y++)
+  for (int y = 0; y < H; y++)                  // white top area, 4-gray gradient below the strip
     for (int x = 0; x < W; x++)
-      fb[y * W + x] = (uint8_t)(x * 4 / W);          // 0,1,2,3 left->right (black->white)
-  // a white strip across the top to hold the moving block (gray 3 = white)
-  for (int y = 0; y < 80; y++)
-    for (int x = 0; x < W; x++) fb[y * W + x] = 3;
+      fb[y * W + x] = (y > STRIP_Y + STRIP_H + 20) ? (uint8_t)(x * 4 / W) : 3;
+  canvas.fillScreen(0); canvas.setTextColor(1);
+  canvas.setTextSize(5); canvas.setCursor(20, 22); canvas.print("reTerminal E1001");
+  canvas.setTextSize(2); canvas.setCursor(20, 82); canvas.print("4-level gray + fast partial refresh");
+  for (int y = 0; y < STRIP_Y; y++)            // stamp the title (black) onto the buffer
+    for (int x = 0; x < W; x++) if (canvas.getPixel(x, y)) fb[y * W + x] = 0;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
   if (!epd.begin()) { Serial.println("PSRAM alloc failed — enable OPI PSRAM"); while (true) delay(1000); }
-  drawGradient();
-  epd.displayFull();                                  // ~4.2 s, crisp 4-level gray
-  Serial.println("full gray refresh done");
+  drawBase();
+  epd.displayFull();                           // ~4.2 s, crisp 4-level gray
 }
 
 void loop() {
-  // Move a 64x64 black block one step along the white top strip, partial-refreshing only the
-  // strip it touches. Each update is ~0.4 s vs ~4 s for a full refresh.
   uint8_t* fb = epd.buffer();
   const int W = epd.width();
-  for (int y = 8; y < 72; y++) for (int x = 0; x < W; x++) fb[y * W + x] = 3;  // clear strip
-  for (int y = 8; y < 72; y++) for (int x = blockX; x < blockX + 64 && x < W; x++) fb[y * W + x] = 0;
-  epd.partial(0, 8, W, 64);                           // refresh just the strip
+  for (int y = STRIP_Y; y < STRIP_Y + STRIP_H; y++) for (int x = 0; x < W; x++) fb[y * W + x] = 3;
+  for (int y = STRIP_Y; y < STRIP_Y + STRIP_H; y++)
+    for (int x = blockX; x < blockX + 64 && x < W; x++) fb[y * W + x] = 0;
+  epd.partial(0, STRIP_Y, W, STRIP_H);         // ~0.4 s — only the strip
   blockX = (blockX + 80) % (W - 64);
   delay(2000);
 }

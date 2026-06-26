@@ -27,13 +27,15 @@ struct Widget { uint8_t type; int16_t x, y, w, h; bool fast;
                 const char* source; const char* fmt; uint8_t size; };
 
 static const Widget CFG_WIDGETS[] = {
-  { W_TEXT,   24,  14, 500,  30, false, "static:My Dashboard",  "",        3 },
-  { W_BOX,    20,  60, 760, 250, false, "",                     "",        0 },
-  { W_VALUE,  44, 120, 340,  90, true,  "lhm:CPU Package",      "%.0f C",  9 },
-  { W_VALUE, 430, 120, 340,  90, true,  "lhm:GPU Core",         "%.0f C",  9 },
-  { W_BAR,    44, 250, 340,  34, true,  "lhm:CPU Total",        "0:100",   0 },
-  { W_BAR,   430, 250, 340,  34, true,  "lhm:GPU Core:%",       "0:100",   0 },
-  { W_TEXT,   24, 440, 500,  24, true,  "clock:%H:%M:%S",       "",        3 },
-  { W_VALUE, 600, 440, 180,  24, true,  "batt",                 "%.0f%%",  3 },
+  { W_TEXT,   24,  16, 560,  30, false, "static:reTerminal Dashboard", "",       3 },
+  { W_QR,    632,  10, 158, 158, false, "static:https://github.com/Toastee0/Seeed_E100X_LibSaltee", "", 0 },
+  { W_TEXT,   44,  88, 200,  20, false, "static:CPU",           "",        2 },
+  { W_VALUE,  44, 110, 320,  90, true,  "lhm:CPU Package",      "%.0f C",  8 },
+  { W_BAR,    44, 210, 420,  30, true,  "lhm:CPU Total",        "0:100",   0 },
+  { W_TEXT,   44, 258, 200,  20, false, "static:GPU",           "",        2 },
+  { W_VALUE,  44, 280, 320,  90, true,  "lhm:GPU Core",         "%.0f C",  8 },
+  { W_BAR,    44, 380, 420,  30, true,  "lhm:GPU Core:%",       "0:100",   0 },
+  { W_TEXT,  500, 300, 290,  30, true,  "clock:%H:%M:%S",       "",        3 },
+  { W_VALUE, 500, 360, 290,  30, true,  "batt",                 "batt %.0f%%", 3 },
 };
 static const int CFG_WIDGET_COUNT = sizeof(CFG_WIDGETS) / sizeof(CFG_WIDGETS[0]);
