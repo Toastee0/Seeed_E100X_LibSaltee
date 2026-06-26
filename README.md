@@ -12,6 +12,22 @@ is driven through GxEPD2 with the board's pin map and a raw-frame blit helper.
 > back to the community — Seeed put these panels in our hands, so here's a clean, reusable
 > firmware set in return. GPL-3.0, same spirit as the GxEPD2 driver it builds on.
 
+## Just want it running? (no serial console, no coding)
+
+You don't need to be a programmer or touch a serial terminal — the device tells you what it's
+doing **on its own screen**.
+
+1. **Flash it once.** Easiest is straight from a Chrome/Edge browser, or one `pip install` and a
+   command — full walkthrough in **[`docs/SETUP.md`](docs/SETUP.md)**. Start with the **WiFiSetup**
+   example.
+2. **Set up WiFi by phone.** On first boot the device becomes its own hotspot and shows a QR to
+   join it plus on-screen instructions. Join, a web page lists nearby networks, you pick yours and
+   type the password. That's it — no editing code, no serial.
+3. If something's wrong (bad password, etc.) the **screen says so**. Serial is optional, for
+   developers only.
+
+The rest of this README is for developers building on the library.
+
 ## Boards
 
 | | **E1001** (mono) | **E1002** (colour) |
@@ -69,6 +85,7 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
 | **NetScan** | ICMP ping-sweep of the device's own /24 (no extra library) → a live grid of which hosts are up, partial-refreshed. |
 | **WiFiQR** | a "scan to join my WiFi" QR, generated **on-device** from the credentials it already knows (`WiFi.SSID()`/`WiFi.psk()`) — uses the ESP32 core's built-in QR encoder, no extra library. |
+| **WiFiSetup** | **no-code, no-serial onboarding**: captive-portal WiFi setup with on-screen status + a QR to join the device's setup hotspot. Hold Refresh at boot to re-provision. |
 
 ## On-board peripherals
 
@@ -81,8 +98,13 @@ through the long colour refresh.
 
 ## Docs
 
+- [`docs/SETUP.md`](docs/SETUP.md) — **start here to flash the board**: browser flashing, the
+  `esptool` command line, or the Arduino IDE — for people who've never used an ESP32.
+- [`docs/SERVER.md`](docs/SERVER.md) — a complete copy-paste server for the **ThinClient** example
+  (exact Python version + install, and why).
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) — pin map, peripherals, and the gotchas worth knowing.
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the simple raw-frame format used by ThinClient.
+- [`SKILLS.md`](SKILLS.md) — orientation for AI coding agents (and a quick architecture tour).
 
 ## Credit & licence
 
