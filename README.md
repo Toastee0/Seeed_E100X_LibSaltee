@@ -68,6 +68,7 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **ThinClient** | fetch an 800×480 gray frame from *your* server and partial-refresh only what changed — render server-side, change the UI with no reflash. |
 | **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
 | **NetScan** | ICMP ping-sweep of the device's own /24 (no extra library) → a live grid of which hosts are up, partial-refreshed. |
+| **WiFiQR** | a "scan to join my WiFi" QR, generated **on-device** from the credentials it already knows (`WiFi.SSID()`/`WiFi.psk()`) — uses the ESP32 core's built-in QR encoder, no extra library. |
 
 ## On-board peripherals
 
