@@ -1,0 +1,136 @@
+<!doctype html>
+<!-- dashboard.html — design a widget layout and download config.h for the Dashboard example.
+     Part of reterminal-epaper (GPL-3.0-or-later). Opens offline in any browser. -->
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>reTerminal — dashboard designer</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:980px;margin:18px auto;padding:0 14px;color:#1b1b1b}
+  h1{font-size:1.4em} h2{font-size:1.05em;margin-top:1.4em;border-bottom:1px solid #ddd;padding-bottom:4px}
+  label{min-width:110px;display:inline-block} input,select{font-size:.95em;padding:5px}
+  input[type=text]{width:100%;box-sizing:border-box} .row{display:flex;gap:8px;align-items:center;margin:4px 0;flex-wrap:wrap}
+  textarea{width:100%;height:90px;font-family:monospace;font-size:.8em} .muted{color:#777}
+  table{border-collapse:collapse;width:100%;font-size:.85em} td,th{border:1px solid #ddd;padding:3px 5px;text-align:left}
+  td input,td select{width:100%;box-sizing:border-box;padding:3px} .n input{width:54px}
+  #preview{border:1px solid #888;background:#fff;width:100%;max-width:800px;image-rendering:pixelated;margin-top:8px}
+  button{font-size:.95em;padding:7px 12px;cursor:pointer} #dl{background:#1a7f37;color:#fff;border:0;border-radius:6px;font-size:1.1em}
+  .fast{color:#1a7f37;font-weight:bold}
+</style>
+<h1>reTerminal &mdash; dashboard designer</h1>
+<p class="muted">Lay out widgets, toggle which ones use the fast partial refresh, and download a
+<code>config.h</code> for the <b>Dashboard</b> example. Green outline = fast (its box is a
+partial-refresh region). No coding.</p>
+
+<h2>Connection</h2>
+<div class="row"><label>WiFi</label><input id="ssid" type="text" placeholder="ssid" style="flex:1">
+  <input id="pass" type="text" placeholder="password" style="flex:1"></div>
+<div class="row"><label>Data URL</label><input id="url" type="text" value="http://192.168.1.50:8085/data.json"></div>
+<div class="row"><label>Refresh (s)</label><input id="refresh" class="n2" type="number" value="2" style="width:70px">
+  <label>Full every</label><input id="full" type="number" value="60" style="width:70px"></div>
+
+<h2>LibreHardwareMonitor sensors (optional)</h2>
+<p class="muted">Paste your <b>/data.json</b> to get a sensor list for the <code>lhm:</code> source.</p>
+<textarea id="json" placeholder="paste /data.json (optional)"></textarea>
+<div class="row"><button onclick="loadJson()">Load sensors</button><span id="loadmsg" class="muted"></span></div>
+
+<h2>Widgets</h2>
+<div class="row">
+  <button onclick="add('W_TEXT')">+ Text line</button><button onclick="add('W_VALUE')">+ Value</button>
+  <button onclick="add('W_BAR')">+ Bar</button><button onclick="add('W_BOX')">+ Box</button>
+  <button onclick="add('W_BLOCK')">+ Text block</button><button onclick="add('W_QR')">+ QR</button>
+</div>
+<table id="tbl"><thead><tr><th>Type</th><th>Source</th><th>Format</th>
+  <th class="n">X</th><th class="n">Y</th><th class="n">W</th><th class="n">H</th>
+  <th class="n">Sz</th><th>Fast</th><th></th></tr></thead><tbody></tbody></table>
+<canvas id="preview" width="800" height="480"></canvas>
+
+<h2>Download</h2>
+<p><button id="dl" onclick="dl()">⬇ Download config.h</button>
+  <span class="muted">→ put it in <code>examples/Dashboard/</code>, then compile &amp; flash.</span></p>
+
+<script>
+const $=id=>document.getElementById(id);
+let sensors=[], items=[];
+const TYPES=['W_BOX','W_BAR','W_VALUE','W_TEXT','W_BLOCK','W_QR'];
+const SCHEMES=['static','lhm','clock','batt','temp','hum','json'];
+
+function unitOf(v){v=v||'';if(v.includes('%'))return'%';if(/MHz/.test(v))return'M';if(/\bW\b/.test(v))return'W';return'C';}
+function walk(n,o){if(!n)return;const v=n.Value||'';if(n.Text&&v&&/\d/.test(v))o.push({name:n.Text,unit:unitOf(v),value:v});(n.Children||[]).forEach(c=>walk(c,o));}
+function loadJson(){try{const t=JSON.parse($('json').value);sensors=[];walk(t,sensors);
+  const s=new Set();sensors=sensors.filter(x=>{const k=x.name+x.unit;if(s.has(k))return false;s.add(k);return true;});
+  $('loadmsg').textContent=sensors.length+' sensors';renderRows();}catch(e){$('loadmsg').textContent='bad JSON';}}
+
+function defForType(t){
+  const base={type:t,x:40,y:60+items.length*40,w:300,h:60,size:3,fast:true,scheme:'static',arg:'',fmt:''};
+  if(t==='W_BOX'){base.scheme='';base.fast=false;base.w=300;base.h=120;}
+  if(t==='W_BAR'){base.fmt='0:100';base.scheme='lhm';base.h=34;base.size=0;}
+  if(t==='W_VALUE'){base.fmt='%.0f';base.scheme='lhm';base.size=8;base.w=300;base.h=90;}
+  if(t==='W_TEXT'){base.scheme='clock';base.arg='%H:%M:%S';base.h=30;}
+  if(t==='W_BLOCK'){base.scheme='static';base.arg='Hello reTerminal';base.fast=false;base.h=120;}
+  if(t==='W_QR'){base.scheme='static';base.arg='https://example.com';base.fast=false;base.w=180;base.h=180;base.size=0;}
+  return base;
+}
+function add(t){items.push(defForType(t));renderRows();}
+function del(i){items.splice(i,1);renderRows();}
+function upd(i,k,v){items[i][k]=v;draw();}
+
+function srcCell(it,i){
+  let s=`<select onchange="upd(${i},'scheme',this.value);renderRows()">`+
+    SCHEMES.map(x=>`<option ${x===it.scheme?'selected':''}>${x}</option>`).join('')+`</select>`;
+  if(it.scheme==='lhm'){
+    s+=`<input list="sl" value="${it.arg}" onchange="upd(${i},'arg',this.value)" placeholder="Sensor Name[:unit]">`;
+  } else if(['batt','temp','hum',''].includes(it.scheme)){ /* no arg */ }
+  else { s+=`<input value="${it.arg}" onchange="upd(${i},'arg',this.value)" placeholder="${it.scheme==='clock'?'%H:%M':it.scheme==='json'?'json key':'text'}">`; }
+  return s;
+}
+function renderRows(){
+  $('tbl').querySelector('tbody').innerHTML=items.map((it,i)=>`<tr>
+    <td><select onchange="upd(${i},'type',this.value);renderRows()">${TYPES.map(t=>`<option ${t===it.type?'selected':''}>${t.slice(2)}</option>`).join('')}</select></td>
+    <td>${srcCell(it,i)}</td>
+    <td><input value="${it.fmt}" onchange="upd(${i},'fmt',this.value)" placeholder="${it.type==='W_BAR'?'min:max':it.type==='W_VALUE'?'%.1f C':'suffix'}"></td>
+    <td class="n"><input type=number value="${it.x}" onchange="upd(${i},'x',+this.value)"></td>
+    <td class="n"><input type=number value="${it.y}" onchange="upd(${i},'y',+this.value)"></td>
+    <td class="n"><input type=number value="${it.w}" onchange="upd(${i},'w',+this.value)"></td>
+    <td class="n"><input type=number value="${it.h}" onchange="upd(${i},'h',+this.value)"></td>
+    <td class="n"><input type=number value="${it.size}" onchange="upd(${i},'size',+this.value)"></td>
+    <td style="text-align:center"><input type=checkbox ${it.fast?'checked':''} onchange="upd(${i},'fast',this.checked)"></td>
+    <td><button onclick="del(${i})">✕</button></td></tr>`).join('');
+  $('tbl').insertAdjacentHTML('afterend','');
+  let dl=document.getElementById('sl'); if(dl) dl.remove();
+  document.body.insertAdjacentHTML('beforeend',`<datalist id="sl">${sensors.map(s=>`<option value="${s.name}${s.unit==='%'?':%':''}">`).join('')}</datalist>`);
+  draw();
+}
+function sampleVal(it){ const s=sensors.find(x=>x.name===(it.arg||'').split(':')[0]);
+  if(it.scheme==='static')return it.arg; if(it.scheme==='clock')return '12:34:56';
+  if(it.scheme==='batt')return '85'; if(it.scheme==='temp')return '21.5'; if(it.scheme==='hum')return '47';
+  if(it.scheme==='lhm'&&s)return String(parseFloat(s.value)||0); return '42'; }
+function draw(){const c=$('preview').getContext('2d');c.fillStyle='#fff';c.fillRect(0,0,800,480);
+  items.forEach(it=>{ c.strokeStyle=it.fast?'#1a7f37':'#bbb'; c.lineWidth=it.fast?3:1; c.strokeRect(it.x,it.y,it.w,it.h);
+    c.fillStyle='#000'; c.textBaseline='top';
+    if(it.type==='W_BAR'){c.fillRect(it.x+2,it.y+2,(it.w-4)*0.6,it.h-4);}
+    else if(it.type==='W_QR'){c.font='14px monospace';c.fillText('[QR]',it.x+6,it.y+6);}
+    else{let v=sampleVal(it); let txt=it.type==='W_VALUE'&&it.fmt.includes('%')? it.fmt.replace(/%[.\d]*f/,v).replace(/%%/,'%') : v+it.fmt;
+      c.font=(8*(it.size||3))+'px monospace'; c.fillText(txt,it.x,it.y);} });
+}
+function src(it){ if(['batt','temp','hum'].includes(it.scheme))return it.scheme; if(it.scheme==='')return ''; return it.scheme+':'+it.arg; }
+function esc(s){return String(s).replace(/\\/g,'\\\\').replace(/"/g,'\\"');}
+function dl(){
+  const rows=items.map(it=>`  { ${it.type}, ${it.x|0}, ${it.y|0}, ${it.w|0}, ${it.h|0}, ${it.fast?'true':'false'}, "${esc(src(it))}", "${esc(it.fmt)}", ${it.size|0} },`).join('\n');
+  const h=`// config.h — generated by extras/dashboard.html. Drop in examples/Dashboard/ and compile.
+#pragma once
+#include <stdint.h>
+#define CFG_WIFI_SSID  "${esc($('ssid').value)}"
+#define CFG_WIFI_PASS  "${esc($('pass').value)}"
+#define CFG_DATA_URL   "${esc($('url').value)}"
+#define CFG_REFRESH_S  ${(+$('refresh').value)||2}
+#define CFG_FULL_EVERY ${(+$('full').value)||60}
+enum { W_BOX, W_BAR, W_VALUE, W_TEXT, W_BLOCK, W_QR };
+struct Widget { uint8_t type; int16_t x, y, w, h; bool fast; const char* source; const char* fmt; uint8_t size; };
+static const Widget CFG_WIDGETS[] = {
+${rows}
+};
+static const int CFG_WIDGET_COUNT = sizeof(CFG_WIDGETS) / sizeof(CFG_WIDGETS[0]);
+`;
+  const b=new Blob([h],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='config.h';a.click();
+}
+add('W_TEXT'); items[0].scheme='static'; items[0].arg='My Dashboard'; items[0].fast=false; renderRows();
+</script>

@@ -85,6 +85,7 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
 | **NetScan** | ICMP ping-sweep of the device's own /24 (no extra library) → a live grid of which hosts are up, partial-refreshed. |
 | **PCMonitor** | parse a Windows PC's **LibreHardwareMonitor** JSON on-device → live CPU/GPU temps, partial-refreshed. See [`docs/PC_MONITOR.md`](docs/PC_MONITOR.md). |
+| **Dashboard** | a config-driven **widget engine** — boxes, bars, values, text, QR — each with a bounding box + fast-refresh flag, designed in a browser (`extras/dashboard.html`). See [`docs/WIDGETS.md`](docs/WIDGETS.md). |
 | **WiFiQR** | a "scan to join my WiFi" QR, generated **on-device** from the credentials it already knows (`WiFi.SSID()`/`WiFi.psk()`) — uses the ESP32 core's built-in QR encoder, no extra library. |
 | **WiFiSetup** | **no-code, no-serial onboarding**: captive-portal WiFi setup with on-screen status + a QR to join the device's setup hotspot. Hold Refresh at boot to re-provision. |
 
@@ -107,6 +108,8 @@ through the long colour refresh.
   **LibreHardwareMonitor**, then either parse its JSON on-device or render via a small Python app.
 - [`docs/HOME_ASSISTANT.md`](docs/HOME_ASSISTANT.md) — pull **Home Assistant** entities (token +
   REST API) and render them to the panel.
+- [`docs/WIDGETS.md`](docs/WIDGETS.md) — the **Dashboard** widget model (types, bounding boxes,
+  fast-refresh flag, source schemes) and how to add your own data source.
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) — pin map, peripherals, and the gotchas worth knowing.
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the simple raw-frame format used by ThinClient.
 - [`SKILLS.md`](SKILLS.md) — orientation for AI coding agents (and a quick architecture tour).
