@@ -37,6 +37,13 @@ constexpr int PIN_MIC_DATA = 41;   // PDM data
 
 constexpr uint8_t SHT4X_ADDR = 0x44;
 
+// ---- battery (2000 mAh LiPo, measured via an ADC divider) ----
+// Per Seeed's reference config: read GPIO1 at 12 dB attenuation and multiply by 2.0 (the
+// divider ratio); GPIO21 must be driven HIGH to power the divider before reading.
+constexpr int PIN_BATTERY_ADC    = 1;
+constexpr int PIN_BATTERY_ENABLE = 21;
+constexpr float BATTERY_DIVIDER  = 2.0f;
+
 // ---- panel geometry (both 7.x" panels are 800x480 landscape) ----
 constexpr int PANEL_W = 800;
 constexpr int PANEL_H = 480;

@@ -10,8 +10,35 @@ void Peripherals::begin(bool powerMic) {
   pinMode(PIN_BTN_RIGHT,   INPUT_PULLUP);
   pinMode(PIN_LED, OUTPUT);  digitalWrite(PIN_LED, HIGH);    // off (active-low)
   pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_BATTERY_ENABLE, OUTPUT); digitalWrite(PIN_BATTERY_ENABLE, LOW);  // divider off until read
+  analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);                          // ~0-3.1V (matches 12dB)
   if (powerMic) { pinMode(PIN_MIC_EN, OUTPUT); digitalWrite(PIN_MIC_EN, HIGH); }
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+}
+
+float Peripherals::batteryVolts() {
+  digitalWrite(PIN_BATTERY_ENABLE, HIGH);                  // power the divider
+  delay(10);                                               // settle (Seeed: 10 ms before analogRead)
+  uint32_t mv = analogReadMilliVolts(PIN_BATTERY_ADC);     // calibrated mV at the divider tap
+  digitalWrite(PIN_BATTERY_ENABLE, LOW);                   // drop it again to save power
+  return (mv / 1000.0f) * BATTERY_DIVIDER;
+}
+
+uint8_t Peripherals::batteryPercent() {
+  // Piecewise-linear LiPo curve, anchored on Seeed's calibrate_linear (4.15 V -> 100 %, 3.27 -> 0).
+  static const struct { float v; float pct; } CURVE[] = {
+    {4.15f, 100}, {4.05f, 95}, {3.96f, 90}, {3.87f, 75}, {3.79f, 55},
+    {3.70f, 40}, {3.60f, 25}, {3.50f, 12}, {3.40f, 5}, {3.27f, 0},
+  };
+  float v = batteryVolts();
+  if (v >= CURVE[0].v) return 100;
+  for (size_t i = 1; i < sizeof(CURVE) / sizeof(CURVE[0]); i++) {
+    if (v >= CURVE[i].v) {
+      float f = (v - CURVE[i].v) / (CURVE[i - 1].v - CURVE[i].v);
+      return (uint8_t)(CURVE[i].pct + f * (CURVE[i - 1].pct - CURVE[i].pct) + 0.5f);
+    }
+  }
+  return 0;
 }
 
 // Simple debounced edge: fire when the pin transitions released(HIGH) -> pressed(LOW).

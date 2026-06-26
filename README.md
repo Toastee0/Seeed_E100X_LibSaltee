@@ -66,14 +66,17 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **HelloMono** | grayscale full refresh + a block that steps across the screen via fast partials. No deps. |
 | **HelloColor** | the six inks + live SHT4x reading on the E1002. Needs GxEPD2. |
 | **ThinClient** | fetch an 800×480 gray frame from *your* server and partial-refresh only what changed — render server-side, change the UI with no reflash. |
-| **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x, no server. |
+| **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
+| **NetScan** | ICMP ping-sweep of the device's own /24 (no extra library) → a live grid of which hosts are up, partial-refreshed. |
 
 ## On-board peripherals
 
 `ReTerminal::Peripherals` wraps the shared hardware: the three front buttons (debounced edge
-detection), the green LED, the buzzer, and the **SHT4x** temp/humidity sensor (read over I²C,
-no extra library). The PDM mic is left to you — it wants a dedicated core-0 task to keep
-capturing through the long colour refresh.
+detection), the green LED, the buzzer, the **SHT4x** temp/humidity sensor (read over I²C, no
+extra library), and the **battery** — `batteryVolts()` / `batteryPercent()` enable the divider
+(GPIO21), read GPIO1 at 12 dB, and apply the ×2 ratio + a LiPo curve (per Seeed's reference
+calibration). The PDM mic is left to you — it wants a dedicated core-0 task to keep capturing
+through the long colour refresh.
 
 ## Docs
 

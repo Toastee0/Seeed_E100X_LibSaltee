@@ -28,6 +28,12 @@ class Peripherals {
   // High-precision SHT4x read (command 0xFD). Returns true on success (with CRC check).
   bool readSHT4x(float& tempC, float& humidityPct);
 
+  // ---- battery (2000 mAh LiPo) ----
+  // Enables the divider (GPIO21), settles, reads GPIO1 (12 dB), applies the 2.0 divider.
+  float batteryVolts();
+  // Battery state of charge 0..100 %, from a LiPo discharge curve (Seeed calibration anchors).
+  uint8_t batteryPercent();
+
  private:
   bool pressedEdge(int pin, bool& lastHigh);
   static uint8_t crc8(const uint8_t* d, int n);
