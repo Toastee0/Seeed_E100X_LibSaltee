@@ -49,7 +49,12 @@ class Mono {
   // rows as one or more bands. Returns the number of pixels that differed (0 = nothing redrawn).
   // `headerRows` rows at the top are left untouched (handy if you keep grayscale chrome there
   // that a B&W partial would blacken). Pass 0 to consider the whole panel.
+  // ANTI-GHOST: B&W partials slowly accumulate ghosting; every setFullEvery() cycles this does a
+  // clean full gray refresh instead of a partial, to wipe it. Default 8 (0 = never auto-full).
   uint32_t refreshChanged(uint16_t headerRows = 0);
+
+  // How many refreshChanged() partial cycles between automatic full (anti-ghost) refreshes.
+  void setFullEvery(uint16_t cycles) { _fullEvery = cycles; }
 
   void sleep();                                              // deep sleep the panel (power off)
 
@@ -72,6 +77,8 @@ class Mono {
   uint8_t* _frame = nullptr;   // working buffer the caller draws into
   uint8_t* _disp  = nullptr;   // snapshot of what's currently on the glass (for partial diffs)
   int _mode = 0;               // 0 = uninit, 1 = gray, 2 = b&w
+  uint16_t _fullEvery = 8;     // refreshChanged(): force a full gray refresh every N partials (anti-ghost)
+  uint16_t _partialCycles = 0; // partials since the last full refresh
 };
 
 }  // namespace ReTerminal

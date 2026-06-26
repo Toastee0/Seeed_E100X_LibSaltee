@@ -144,6 +144,7 @@ void Mono::displayFull() {
   uploadGray4();
   cmd(0x12); delay(100); checkBusy();                        // refresh
   memcpy(_disp, _frame, (size_t)PANEL_W * PANEL_H);
+  _partialCycles = 0;                                        // a full refresh clears accumulated ghosting
 }
 
 bool Mono::partial(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
@@ -165,6 +166,9 @@ bool Mono::partial(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
 }
 
 uint32_t Mono::refreshChanged(uint16_t headerRows) {
+  // anti-ghost: once we've partialed enough times, the next visible change gets a clean full
+  // refresh instead of more partials (which would keep accumulating ghosting).
+  bool wantFull = _fullEvery && _partialCycles >= _fullEvery;
   uint32_t changed = 0;
   int y = headerRows;
   while (y < PANEL_H) {
@@ -182,7 +186,11 @@ uint32_t Mono::refreshChanged(uint16_t headerRows) {
       if (rmx < 0) break;
       if (rmn < gmn) gmn = rmn; if (rmx > gmx) gmx = rmx; changed += (rmx - rmn + 1); y++;
     }
-    partial(gmn, y0, gmx - gmn + 1, y - y0);
+    if (!wantFull) partial(gmn, y0, gmx - gmn + 1, y - y0);  // skip per-band partials if we'll full-refresh
+  }
+  if (changed) {
+    if (wantFull) displayFull();                             // one clean full instead of many partials
+    else _partialCycles++;
   }
   return changed;
 }
