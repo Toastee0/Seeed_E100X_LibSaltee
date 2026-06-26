@@ -23,7 +23,7 @@
 #include <WiFi.h>
 #include <Adafruit_GFX.h>
 #include "esp_sleep.h"
-#include "driver/rtc_io.h"   // rtc_gpio_* — configure the button pad as an ext0 deep-sleep wake source
+#include "driver/rtc_io.h"   // rtc_gpio_* — keep the button pads alive as ext1 deep-sleep wake sources
 #include "ping/ping_sock.h"
 #include "lwip/ip_addr.h"
 #include "lwip/etharp.h"
@@ -229,17 +229,30 @@ static int sweep() {
   return n;
 }
 
+static const uint64_t BTN_MASK =
+    (1ULL << PIN_BTN_REFRESH) | (1ULL << PIN_BTN_LEFT) | (1ULL << PIN_BTN_RIGHT);
+
+// Block (briefly) until no front button is held, so a wake-on-low can't immediately re-fire.
+static void waitButtonsReleased() {
+  uint32_t t = millis();
+  while ((!digitalRead(PIN_BTN_REFRESH) || !digitalRead(PIN_BTN_LEFT) || !digitalRead(PIN_BTN_RIGHT))
+         && millis() - t < 5000) delay(10);
+}
+
 static void deepSleep(uint64_t us) {
-  Serial.printf("[netscan] sleeping %.1f min (press REFRESH to toggle heatmap)\n", us / 60.0e6);
+  Serial.printf("[netscan] sleeping %.1f min (REFRESH=toggle heatmap, LEFT/RIGHT=rescan)\n", us / 60.0e6);
   Serial.flush();
   epd.sleep();                                            // power the panel down (image is retained)
   esp_sleep_enable_timer_wakeup(us);
-  // REFRESH button (GPIO3, RTC-capable, active-low) wakes us to toggle the display mode. ext0 is the
-  // single-pad wake source; enable the pad's RTC pull-up so it reads HIGH until the button grounds it.
-  rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_REFRESH);
-  rtc_gpio_pulldown_dis((gpio_num_t)PIN_BTN_REFRESH);
-  esp_err_t e = esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_BTN_REFRESH, 0);  // 0 = wake when it goes low
-  if (e != ESP_OK) Serial.printf("[netscan] WARN ext0 wake enable failed: %d\n", (int)e);
+  // Front buttons (GPIO 3/5/4, active-low) wake us via ext1/ANY_LOW. The KEY detail on the S3: keep
+  // the RTC_PERIPH power domain ON and set each pad's RTC pull-up, otherwise the pad input/pull dies
+  // when RTC peripherals power down during deep sleep and the press is never sensed (ext0 + bare ext1
+  // both failed for exactly this reason — verified on the E1001).
+  const gpio_num_t btns[3] = {(gpio_num_t)PIN_BTN_REFRESH, (gpio_num_t)PIN_BTN_LEFT, (gpio_num_t)PIN_BTN_RIGHT};
+  for (int i = 0; i < 3; i++) { rtc_gpio_pullup_en(btns[i]); rtc_gpio_pulldown_dis(btns[i]); }
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  esp_err_t e = esp_sleep_enable_ext1_wakeup_io(BTN_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+  if (e != ESP_OK) Serial.printf("[netscan] WARN ext1 wake enable failed: %d\n", (int)e);
   esp_deep_sleep_start();                                 // <- does not return; wakes back into setup()
 }
 
@@ -247,9 +260,9 @@ void setup() {
   Serial.begin(115200); delay(200);
   uint32_t t0 = millis();
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  Serial.printf("[netscan] boot — wake cause = %d (2=ext0/button, 4=timer, 0=cold)\n", (int)cause);
+  Serial.printf("[netscan] boot — wake cause = %d (3=ext1/button, 4=timer, 0=cold)\n", (int)cause);
   bool wokeTimer  = (cause == ESP_SLEEP_WAKEUP_TIMER);
-  bool wokeButton = (cause == ESP_SLEEP_WAKEUP_EXT0);
+  bool wokeButton = (cause == ESP_SLEEP_WAKEUP_EXT1);
   if (!wokeTimer && !wokeButton) {                        // cold power-up: no history, glass unknown
     memset(lastSeenScan, 0, sizeof(lastSeenScan));
     scanIndex = 0; heatmapMode = false; gNet[0] = gNet[1] = gNet[2] = 0;
@@ -259,15 +272,21 @@ void setup() {
   if (!epd.begin()) { Serial.println("PSRAM alloc failed — enable OPI PSRAM"); deepSleep(MIN_SLEEP_US); }
   epd.setFullEvery(0);                        // we manage full refreshes by hand
 
-  if (wokeButton) {                           // REFRESH pressed -> flip mode, re-render now, no rescan
-    heatmapMode = !heatmapMode;
+  if (wokeButton) {                           // a front button woke us — beep ack + act on which one
     io.beep();
-    Serial.printf("[netscan] mode -> %s\n", heatmapMode ? "HEATMAP" : "labeled");
-    renderAll();
-    epd.displayFull();                        // instant grayscale/labeled switch from existing data
-    uint32_t tr = millis();                   // wait for release so we don't immediately wake again
-    while (digitalRead(PIN_BTN_REFRESH) == LOW && millis() - tr < 3000) delay(10);
-    deepSleep(CYCLE_US);                       // resume the hourly cadence from now
+    uint64_t st = esp_sleep_get_ext1_wakeup_status();
+    bool refresh = st & (1ULL << PIN_BTN_REFRESH);
+    Serial.printf("[netscan] button wake (mask 0x%llx) -> %s\n",
+                  (unsigned long long)st, refresh ? "toggle mode" : "rescan now");
+    if (refresh) {                            // REFRESH -> flip display mode, re-render instantly, no rescan
+      heatmapMode = !heatmapMode;
+      Serial.printf("[netscan] mode -> %s\n", heatmapMode ? "HEATMAP" : "labeled");
+      renderAll();
+      epd.displayFull();                      // instant grayscale/labeled switch from existing data
+      waitButtonsReleased();
+      deepSleep(CYCLE_US);                     // resume the hourly cadence from now
+    }
+    waitButtonsReleased();                    // LEFT/RIGHT -> fall through and run a fresh scan immediately
   }
 
   WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -282,8 +301,8 @@ void setup() {
   // Bring the framebuffer to the last-known image. On a timer wake the panel still physically shows
   // it (retained through deep sleep), so we sync the snapshot — no flash. Cold boot full-refreshes.
   renderAll();
-  if (wokeTimer) epd.syncSnapshot();
-  else           epd.displayFull();
+  if (wokeTimer || wokeButton) epd.syncSnapshot();   // glass still shows the retained image -> no flash
+  else                         epd.displayFull();    // cold boot: establish a clean base
 
   scanIndex++;                               // this sweep's index (after reconstructing the prior frame)
   sweep();                                   // streams results (labeled mode also partials per row)
