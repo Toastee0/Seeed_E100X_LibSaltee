@@ -56,6 +56,15 @@ class Mono {
   // How many refreshChanged() partial cycles between automatic full (anti-ghost) refreshes.
   void setFullEvery(uint16_t cycles) { _fullEvery = cycles; }
 
+  // Declare that the working buffer already matches what is physically on the glass, WITHOUT
+  // refreshing. The panel retains its image through deep sleep, but the RAM snapshot is lost; if
+  // you reconstruct the exact retained image into the working buffer after waking, call this so the
+  // next refreshChanged()/partial() diffs against it (and only the freshly-changed cells refresh).
+  void syncSnapshot() {
+    if (_disp && _frame) memcpy(_disp, _frame, (size_t)PANEL_W * PANEL_H);
+    _partialCycles = 0;
+  }
+
   void sleep();                                              // deep sleep the panel (power off)
 
  private:
