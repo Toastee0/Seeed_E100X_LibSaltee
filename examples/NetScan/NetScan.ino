@@ -22,6 +22,7 @@
 // Fill in WIFI_SSID/WIFI_PASS. Needs Adafruit GFX. Board: XIAO_ESP32S3, OPI PSRAM, CDC On Boot.
 #include <WiFi.h>
 #include <Adafruit_GFX.h>
+#include <time.h>            // wall-clock for the "as of" stamp + uptime (ESP32 RTC keeps time in sleep)
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"   // rtc_gpio_* — keep the button pads alive as ext1 deep-sleep wake sources
 #include "ping/ping_sock.h"
@@ -43,6 +44,7 @@ const uint32_t PING_TIMEOUT_MS = 1000;     // generous per-host wait so slow res
                                            // second, so a full /24 sweep takes a few minutes.
 // LABELED mode: a host stays "seen" until it's been quiet this many consecutive sweeps (24 ~= 24 h).
 const uint32_t SEEN_WINDOW_SCANS = 24;
+const char* TZ = "EST5EDT,M3.2.0,M11.1.0";   // local time for the "as of" stamp (Eastern)
 // HEATMAP mode: scans (~hours) per darkness step. 4 levels over 3 steps -> black after ~6 h.
 const uint32_t HEAT_STEP_SCANS = 2;
 const int PROBE_ATTEMPTS = 2;             // retry each host this many times — catches dropped packets
@@ -60,6 +62,7 @@ RTC_DATA_ATTR uint32_t scanIndex;            // sweeps since cold boot (1-based 
 RTC_DATA_ATTR uint32_t lastSeenScan[256];    // scanIndex of each octet's last sighting (0 = never)
 RTC_DATA_ATTR bool heatmapMode;              // false = labeled grid, true = 4-level recency heatmap
 RTC_DATA_ATTR uint8_t gNet[3];               // our /24 base (so we can label the map without WiFi)
+RTC_DATA_ATTR time_t  bootEpoch;             // wall-clock at first successful NTP sync (for uptime)
 
 // Has this octet shown a sign of life within the labeled-mode window? (windowed by scan count)
 static bool seen(int host) {
@@ -149,20 +152,54 @@ static void drawCell(int host) {
   }
 }
 
-// Top-right status line: "N active  batt X%" (heatmap, <6h) or "N seen 24h  batt X%" (labeled).
-static void drawStatus() {
+// Header info, right-aligned, stamped at draw time (NOT a live clock — we only draw on a scan or a
+// button wake, so the timestamp reads "when the screen was last refreshed"; a button press redraws it).
+//   row1: "as of: DD-MM-YYYY h:MMpm"
+//   row2: "up <Xh Ym>  <N> seen (last <W>h)  batt <Z>%"   (heatmap: "N active (6h)")
+static void drawHeaderInfo() {
+  time_t now = time(nullptr);
+  bool haveTime = now > 1700000000;                       // > ~2023 => NTP has set the clock
+  struct tm lt; if (haveTime) localtime_r(&now, &lt);
+
+  // --- row1: "as of:" timestamp (right side, clear of the heatmap legend which sits left of x460) ---
+  char dt[40];
+  if (haveTime) {
+    int h12 = lt.tm_hour % 12; if (!h12) h12 = 12;
+    snprintf(dt, sizeof dt, "as of: %02d-%02d-%04d %d:%02d%s", lt.tm_mday, lt.tm_mon + 1,
+             lt.tm_year + 1900, h12, lt.tm_min, lt.tm_hour < 12 ? "AM" : "PM");
+  } else snprintf(dt, sizeof dt, "as of: (time syncing)");
+  canvas.setTextColor(1); canvas.setTextSize(2);
+  canvas.fillRect(460, 8, PANEL_W - 468, 22, 0);
+  canvas.setCursor(PANEL_W - 12 - (int)strlen(dt) * 12, 14); canvas.print(dt);
+  blit(460, 8, PANEL_W - 460, 24);
+
+  // --- row2: uptime + seen count + window + battery ---
   int count = 0;
   if (heatmapMode) { for (int h = 1; h <= 254; h++) if (heatLevel(h)) count++; }
   else             { for (int h = 1; h <= 254; h++) if (seen(h))      count++; }
-  canvas.fillRect(500, 52, PANEL_W - 508, 22, 0);
-  canvas.setTextColor(1); canvas.setTextSize(2); canvas.setCursor(520, 58);
-  canvas.printf("%d %s  batt %d%%", count, heatmapMode ? "active" : "seen 24h", io.batteryPercent());
-  blit(500, 52, PANEL_W - 500, 24);
+  char up[20] = "";
+  if (haveTime && bootEpoch) {
+    long s = (long)(now - bootEpoch); if (s < 0) s = 0;
+    int uh = s / 3600, um = (s % 3600) / 60;
+    if (uh) snprintf(up, sizeof up, "up %dh%02dm  ", uh, um);
+    else    snprintf(up, sizeof up, "up %dm  ", um);
+  }
+  char st[72];
+  if (heatmapMode) {
+    snprintf(st, sizeof st, "%s%d active (6h)  batt %d%%", up, count, io.batteryPercent());
+  } else {
+    uint32_t w = scanIndex < SEEN_WINDOW_SCANS ? scanIndex : SEEN_WINDOW_SCANS; if (!w) w = 1;
+    snprintf(st, sizeof st, "%s%d seen (last %luh)  batt %d%%", up, count, (unsigned long)w, io.batteryPercent());
+  }
+  canvas.setTextSize(2);
+  canvas.fillRect(260, 52, PANEL_W - 268, 22, 0);
+  canvas.setCursor(PANEL_W - 12 - (int)strlen(st) * 12, 58); canvas.print(st);
+  blit(260, 52, PANEL_W - 260, 24);
 }
 
 // HEATMAP legend: four swatches (fresh -> stale) with end labels. Outlines/labels into the canvas;
 // the gray fills are applied to the buffer after the header is blitted.
-static const int LEG_X = 300, LEG_Y = 54, LEG_SW = 22, LEG_GAP = 6, LEG_H = 18;
+static const int LEG_X = 330, LEG_Y = 6, LEG_SW = 22, LEG_GAP = 6, LEG_H = 18;  // row1, left of the timestamp
 static void drawLegendCanvas() {
   for (int k = 0; k < 4; k++) canvas.drawRect(LEG_X + k * (LEG_SW + LEG_GAP), LEG_Y, LEG_SW, LEG_H, 1);
   canvas.setTextSize(1);
@@ -181,13 +218,12 @@ static void renderAll() {
   canvas.fillScreen(0);
   canvas.setTextColor(1);
   canvas.setTextSize(3); canvas.setCursor(20, 12); canvas.print("reTerminal E1001");
-  canvas.setTextSize(2); canvas.setCursor(596, 18); canvas.print("Seeed Studio");
   canvas.drawFastHLine(20, 46, PANEL_W - 40, 2);
   canvas.setTextSize(2); canvas.setCursor(20, 58); canvas.printf("SUBNET %d.%d.%d.x", gNet[0], gNet[1], gNet[2]);
   if (heatmapMode) drawLegendCanvas();
   blit(0, 0, PANEL_W, GY0);                 // header band (everything above the grid)
   if (heatmapMode) drawLegendShades();      // legend grays go in after the header blit
-  drawStatus();
+  drawHeaderInfo();
   for (int host = 1; host <= 254; host++) drawCell(host);
 }
 
@@ -219,7 +255,7 @@ static int sweep() {
     }
     drawCell(host);                                       // reflect this host in the framebuffer now
     if (host % COLS == 0 || host == 254) {                // row complete
-      drawStatus();
+      drawHeaderInfo();
       if (!heatmapMode) epd.refreshChanged(0);            // labeled: partial-refresh the changed band(s)
     }
   }
@@ -265,7 +301,7 @@ void setup() {
   bool wokeButton = (cause == ESP_SLEEP_WAKEUP_EXT1);
   if (!wokeTimer && !wokeButton) {                        // cold power-up: no history, glass unknown
     memset(lastSeenScan, 0, sizeof(lastSeenScan));
-    scanIndex = 0; heatmapMode = false; gNet[0] = gNet[1] = gNet[2] = 0;
+    scanIndex = 0; heatmapMode = false; gNet[0] = gNet[1] = gNet[2] = 0; bootEpoch = 0;
   }
 
   io.begin();
@@ -297,6 +333,13 @@ void setup() {
   }
   Serial.println("\nwifi up");
   IPAddress me = WiFi.localIP(); gNet[0] = me[0]; gNet[1] = me[1]; gNet[2] = me[2];
+
+  // Re-sync the clock each scan (cheap, WiFi is already up; the RTC holds time across deep sleep so
+  // this just corrects drift). Stamp the boot epoch on the first successful sync -> drives uptime.
+  configTzTime(TZ, "pool.ntp.org", "time.nist.gov", "192.168.2.2");
+  struct tm ti; getLocalTime(&ti, 8000);                  // wait up to 8 s for the first sync
+  if (bootEpoch == 0 && time(nullptr) > 1700000000) bootEpoch = time(nullptr);
+  Serial.printf("[netscan] time %s\n", time(nullptr) > 1700000000 ? "synced" : "NOT synced");
 
   // Bring the framebuffer to the last-known image. On a timer wake the panel still physically shows
   // it (retained through deep sleep), so we sync the snapshot — no flash. Cold boot full-refreshes.
