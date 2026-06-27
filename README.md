@@ -101,7 +101,36 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 *The **Dashboards** example in **LCARS** style: a one-piece top bar carrying the column headers over
 live indoor/outdoor temperature + humidity, a "connected to HQ" sync line sharing the chrono row, a
 full-height status rail (location, weather, chrono, WiFi RSSI/SSID, battery, node IP), and a centered
-NTP clock. LEFT/RIGHT cycle to the Classic Mac and Linux-console styles — all four-level grayscale.*
+NTP clock. LEFT/RIGHT cycle to the Classic Mac and Linux-console styles — all four-level grayscale.
+The LCARS view keeps itself fresh cheaply: every minute it does a fast 1-bit partial refresh of the
+clock and of **only** the readings that changed, with a clean 4-gray full page every 10 minutes to
+clear ghosting.*
+
+### Setting up the Dashboards firmware
+
+**1. Flash it (one time)** with any method in **[`docs/SETUP.md`](docs/SETUP.md)** — browser flasher,
+`esptool`, or the Arduino IDE.
+
+> **Windows: install the serial driver first.** The board talks over a **CH340** USB-serial chip, so
+> Windows needs WCH's **CH340/CH341 VCP** (Virtual COM Port) driver before any `COM` port appears —
+> get `CH341SER` from <https://www.wch-ic.com/downloads/CH341SER_EXE.html>, run it, then replug.
+> (Windows 10/11, macOS, and Linux often auto-install it; if a port shows up, you're already fine.)
+> Also make sure your USB-C cable carries **data**, not charge-only.
+
+**2. Configure it** by editing the block at the top of `examples/Dashboards/Dashboards.ino` before you
+build/flash:
+- `WIFI_SSID` / `WIFI_PASS` — your **2.4 GHz** network (the ESP32-S3 has no 5 GHz radio)
+- `LATITUDE` / `LONGITUDE` / `LOCATION` — your location for the free, key-less **Open-Meteo** weather
+- `TZ` — your POSIX timezone string (drives the NTP clock), e.g. `EST5EDT,M3.2.0,M11.1.0`
+
+Then **LEFT/RIGHT** switch between the LCARS, Classic Mac, and Linux-console styles.
+
+> **Roadmap — a zero-config release.** A packaged release build will fold in the **WiFiSetup**
+> captive-portal onboarding so there's **nothing to edit**: flash once, the device opens its own
+> hotspot and shows a QR, you join and pick your network from a phone web page, then choose your region
+> for weather — and you've got a standalone dashboard with no code changes and no reflash. The building
+> blocks already ship as their own examples (**WiFiSetup**, **WiFiQR**); today you set WiFi + region in
+> the sketch as above.
 
 ### Gallery (on the E1001)
 
