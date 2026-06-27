@@ -456,9 +456,7 @@ static String formPage() {
   for (int i = 0; i < n; i++) s += "<option>" + WiFi.SSID(i) + "</option>";
   s += F("</select><label>WiFi password</label><input name=pass type=password>"
          "<h3 style='color:#f90;margin:18px 0 4px'>Location</h3>"
-         "<p class=hint>For weather &amp; the clock &mdash; use any one of these:</p>"
-         "<button type=button id=geo>Use my current location</button>"
-         "<p id=geostat class=hint>Your phone may ask permission. If it's blocked, just type a city.</p>"
+         "<p class=hint>For weather &amp; the clock.</p>"
          "<label>Type a city</label><input name=cityname placeholder='e.g. Paris, Tokyo, Denver'>"
          "<label>...or pick from the list</label>"
          "<select name=city onchange=\"document.getElementById('custom').style.display="
@@ -474,7 +472,6 @@ static String formPage() {
   for (int i = 0; i < REGION_NZONES; i++)
     s += "<option value=" + String(i) + ">" + REGION_ZONES[i].label + "</option>";
   s += F("</select></div>"
-         "<input type=hidden name=usegeo value=''>"
          "<h3 style='color:#f90;margin:18px 0 4px'>Wireless updates (optional)</h3>"
          "<label class=chk><input type=checkbox name=ota value=1 onchange=\""
          "document.getElementById('otapw').style.display=this.checked?'block':'none'\">"
@@ -484,18 +481,7 @@ static String formPage() {
          "<label class=chk><input type=checkbox name=otashow value=1> Show this password on the display</label>"
          "<p class=hint>Lets the Arduino IDE flash new firmware over WiFi (network port). "
          "Used only if enabled &mdash; there is no default password.</p></div>"
-         "<button type=submit>Save &amp; connect</button></form>"
-         "<script>document.getElementById('geo').onclick=function(){"
-         "var s=document.getElementById('geostat');"
-         "if(!navigator.geolocation){s.textContent='Geolocation not supported here.';return;}"
-         "s.textContent='Requesting location...';"
-         "navigator.geolocation.getCurrentPosition(function(p){"
-         "document.querySelector('[name=lat]').value=p.coords.latitude.toFixed(4);"
-         "document.querySelector('[name=lon]').value=p.coords.longitude.toFixed(4);"
-         "document.querySelector('[name=usegeo]').value='1';"
-         "s.textContent='Location set: '+p.coords.latitude.toFixed(3)+', '+p.coords.longitude.toFixed(3)+'. Tap Save.';"
-         "},function(e){s.textContent='Could not get location: '+e.message+'. Type a city instead.';});"
-         "};</script>");
+         "<button type=submit>Save &amp; connect</button></form>");
   return s;
 }
 
@@ -505,13 +491,11 @@ static void handleSave() {
   // "auto" TZ means "resolve it online once connected" (see resolveLocation()).
   String loc = cfgLoc, tz = cfgTz; float lat = cfgLat, lon = cfgLon;
   String pendingCity = "";
-  String useGeo = web.arg("usegeo"), glat = web.arg("lat"), glon = web.arg("lon");
+  String glat = web.arg("lat"), glon = web.arg("lon");
   String cityname = web.arg("cityname"); cityname.trim();
   String city = web.arg("city");
-  if (useGeo == "1" && glat.length() && glon.length()) {
-    lat = glat.toFloat(); lon = glon.toFloat(); loc = "My location"; tz = "auto";
-  } else if (cityname.length()) {
-    pendingCity = cityname; loc = cityname; tz = "auto";          // lat/long resolved at boot
+  if (cityname.length()) {
+    pendingCity = cityname; loc = cityname; tz = "auto";          // typed city -> lat/long resolved at boot
   } else if (city.length() && city != "custom") {
     int i = city.toInt();
     if (i >= 0 && i < REGION_NCITIES) {
@@ -576,19 +560,18 @@ static void beginOTA() {
   if (!cfgOta || !cfgOtaPass.length()) return;
   ArduinoOTA.setHostname(apName.c_str());
   ArduinoOTA.setPassword(cfgOtaPass.c_str());
-  ArduinoOTA.onStart([] {
-    lcChrome("OTA UPDATE");
-    String l[] = { "Receiving new", "firmware...", "", "Do not power off." };
-    lcBody(l, 4); lcFlush();
-  });
-  ArduinoOTA.onError([](ota_error_t) {
-    lcChrome("OTA FAILED");
-    String l[] = { "Update error.", "Rebooting..." };
-    lcBody(l, 2); lcFlush();
-  });
+  // Keep these callbacks LIGHT — serial only. A blocking ~4s e-paper full refresh here stalls the OTA
+  // data phase long enough for the uploader (espota) to time out mid-transfer. So the dashboard just
+  // freezes during an update and the device reboots into the new image when it completes.
+  ArduinoOTA.onStart([] { Serial.println("OTA: update starting"); });
+  ArduinoOTA.onEnd  ([] { Serial.println("OTA: complete, rebooting"); });
+  ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA: error %u\n", e); });
   ArduinoOTA.begin();
   g_ota = true;
-  Serial.printf("OTA enabled: host=%s port=3232\n", apName.c_str());
+  // Print the OTA password to serial on every boot. Anyone with the serial console already has
+  // physical/USB access (they can reflash at will), so hiding it only locks out the legitimate
+  // owner who just wants the credential back — give up the goods rather than make them break in.
+  Serial.printf("OTA enabled: host=%s port=3232 password=%s\n", apName.c_str(), cfgOtaPass.c_str());
 }
 
 static void draw(const struct tm& t, bool full) {
@@ -620,7 +603,13 @@ void setup() {
   if (!cfgSsid.length() || forceSetup) { startPortal(); return; }   // no creds / forced -> onboarding
 
   screenConnecting(cfgSsid);
-  WiFi.mode(WIFI_STA); WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);       // scan every channel, then...
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);   // ...join the STRONGEST AP for this SSID, not just the
+                                                   // first one found. On mesh/multi-AP networks the default
+                                                   // fast-scan can latch onto a weak node — a poor link still
+                                                   // passes ping/weather but starves a sustained OTA transfer.
+  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
   for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
   if (WiFi.status() != WL_CONNECTED) { screenFailed(cfgSsid); delay(1500); startPortal(); return; }
 
