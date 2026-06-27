@@ -36,6 +36,11 @@ bool Mono::begin() {
   pinMode(PIN_EPD_CS, OUTPUT);  pinMode(PIN_EPD_DC, OUTPUT);
   pinMode(PIN_EPD_RES, OUTPUT); pinMode(PIN_EPD_BUSY, INPUT);
   csHigh(); digitalWrite(PIN_EPD_DC, HIGH);
+  // Deselect the on-board microSD: it sits on this same SPI bus, and if its CS floats it corrupts the
+  // panel's data (notably the 4-gray bit-planes -> collapses to 2 levels). Keep it deselected + powered
+  // down here; a sketch that wants SD re-enables it (drive SD_EN high) AFTER epd.begin().
+  pinMode(PIN_SD_CS, OUTPUT); digitalWrite(PIN_SD_CS, HIGH);
+  pinMode(PIN_SD_EN, OUTPUT); digitalWrite(PIN_SD_EN, LOW);
   _spi.begin(PIN_EPD_SCK, PIN_EPD_MISO, PIN_EPD_MOSI, PIN_EPD_CS);  // MISO routed so the SD card can share this bus
   const size_t n = (size_t)PANEL_W * PANEL_H;
   _frame = (uint8_t*)ps_malloc(n);
