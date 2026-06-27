@@ -14,11 +14,21 @@ namespace ReTerminal {
 
 // ---- e-paper panel (SPI) ----
 constexpr int PIN_EPD_SCK  = 7;
+constexpr int PIN_EPD_MISO = 8;    // shared SPI bus MISO — the panel is write-only, but the on-board
+                                   // microSD reads on this line (see SD pins below). Routing it costs
+                                   // nothing for the EPD and lets SD share the bus.
 constexpr int PIN_EPD_MOSI = 9;
 constexpr int PIN_EPD_CS   = 10;
 constexpr int PIN_EPD_DC   = 11;
 constexpr int PIN_EPD_RES  = 12;
 constexpr int PIN_EPD_BUSY = 13;   // HIGH = ready
+
+// ---- on-board microSD (shares the EPD SPI bus: SCK 7 / MISO 8 / MOSI 9) ----
+// Schematic (reTerminal E1001 V1.2, sheet 6 "SD Card"): the card is powered through a TPS22916
+// load switch — SD_EN must be driven HIGH before SD.begin() or the card never powers up.
+constexpr int PIN_SD_CS  = 14;
+constexpr int PIN_SD_EN  = 16;     // load-switch enable: HIGH = card powered
+constexpr int PIN_SD_DET = 15;     // card-detect (LOW = card inserted)
 
 // ---- buttons (active-low; 10k pull-up + 100nF on-board) ----
 // LEFT/RIGHT are pins 5/4 (swapped from silk so the physical direction matches page order).

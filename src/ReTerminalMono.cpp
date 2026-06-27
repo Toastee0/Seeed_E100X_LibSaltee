@@ -36,7 +36,7 @@ bool Mono::begin() {
   pinMode(PIN_EPD_CS, OUTPUT);  pinMode(PIN_EPD_DC, OUTPUT);
   pinMode(PIN_EPD_RES, OUTPUT); pinMode(PIN_EPD_BUSY, INPUT);
   csHigh(); digitalWrite(PIN_EPD_DC, HIGH);
-  _spi.begin(PIN_EPD_SCK, -1, PIN_EPD_MOSI, PIN_EPD_CS);
+  _spi.begin(PIN_EPD_SCK, PIN_EPD_MISO, PIN_EPD_MOSI, PIN_EPD_CS);  // MISO routed so the SD card can share this bus
   const size_t n = (size_t)PANEL_W * PANEL_H;
   _frame = (uint8_t*)ps_malloc(n);
   _disp  = (uint8_t*)ps_malloc(n);

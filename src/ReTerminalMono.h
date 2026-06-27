@@ -34,6 +34,10 @@ class Mono {
   // Draw here, then displayFull()/partial(). Never null after a successful begin().
   uint8_t* buffer() { return _frame; }
 
+  // The SPI bus the panel runs on (HSPI, with MISO routed). Share it with the on-board microSD —
+  // `SD.begin(PIN_SD_CS, epd.spi(), freq)` — so both live on one bus (drive PIN_SD_EN high first).
+  SPIClass& spi() { return _spi; }
+
   void fill(uint8_t gray);                                   // fill the working buffer (0..3)
 
   // Full 4-level-gray refresh of the whole panel from the working buffer (~4.2s). Re-inits the
