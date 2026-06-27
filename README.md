@@ -89,7 +89,7 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **HelloColor** | the six inks + live SHT4x reading on the E1002. Needs GxEPD2. |
 | **ThinClient** | fetch an 800×480 gray frame from *your* server and partial-refresh only what changed — render server-side, change the UI with no reflash. |
 | **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
-| **Dashboards** | the same self-contained data rendered three ways in one sketch — **LCARS** (TNG), **Classic Mac**, **Linux console** — LEFT/RIGHT cycle the style. The LCARS view is pictured below. |
+| **Dashboards** | the same self-contained data rendered three ways in one sketch — **LCARS** (TNG), **Classic Mac**, **Linux console** — LEFT/RIGHT cycle the style. **Zero-config:** sets up WiFi + location from your phone (captive portal + on-device QR), no creds in source, optional OTA. The LCARS view is pictured below. |
 | **NetScan** | hourly "seen any sign of life lately" map of the device's own /24 (no extra library) — ICMP **and** ARP (catches hosts that block ping), wakes/scans/full-refreshes/deep-sleeps each hour, RTC-backed seen-state. Two modes (toggle with the REFRESH button): a **labeled** grid (live-streamed per row) and a **4-level-gray heatmap** that darkens a cell the longer since it was last seen (2 h/shade, black at 6 h). |
 | **PCMonitor** | parse a Windows PC's **LibreHardwareMonitor** JSON on-device → live CPU/GPU temps, partial-refreshed. See [`docs/PC_MONITOR.md`](docs/PC_MONITOR.md). |
 | **Dashboard** | a config-driven **widget engine** — boxes, bars, values, text, QR — each with a bounding box + fast-refresh flag, designed in a browser (`extras/dashboard.html`). See [`docs/WIDGETS.md`](docs/WIDGETS.md). |
@@ -106,10 +106,11 @@ The LCARS view keeps itself fresh cheaply: every minute it does a fast 1-bit par
 clock and of **only** the readings that changed, with a clean 4-gray full page every 10 minutes to
 clear ghosting.*
 
-### Setting up the Dashboards firmware
+### Setting up the Dashboards firmware — zero-config, by phone
 
-**1. Flash it (one time)** with any method in **[`docs/SETUP.md`](docs/SETUP.md)** — browser flasher,
-`esptool`, or the Arduino IDE.
+**Flash it once** with any method in **[`docs/SETUP.md`](docs/SETUP.md)** — browser flasher, `esptool`,
+or the Arduino IDE. **There is nothing to edit in the sketch:** no WiFi credentials, no location, no
+timezone — the source ships with no secrets at all.
 
 > **Windows: install the serial driver first.** The board talks over a **CH340** USB-serial chip, so
 > Windows needs WCH's **CH340/CH341 VCP** (Virtual COM Port) driver before any `COM` port appears —
@@ -117,20 +118,24 @@ clear ghosting.*
 > (Windows 10/11, macOS, and Linux often auto-install it; if a port shows up, you're already fine.)
 > Also make sure your USB-C cable carries **data**, not charge-only.
 
-**2. Configure it** by editing the block at the top of `examples/Dashboards/Dashboards.ino` before you
-build/flash:
-- `WIFI_SSID` / `WIFI_PASS` — your **2.4 GHz** network (the ESP32-S3 has no 5 GHz radio)
-- `LATITUDE` / `LONGITUDE` / `LOCATION` — your location for the free, key-less **Open-Meteo** weather
-- `TZ` — your POSIX timezone string (drives the NTP clock), e.g. `EST5EDT,M3.2.0,M11.1.0`
+On first boot — or any time you **hold REFRESH at power-on** — the device opens its own WiFi hotspot
+and shows an LCARS setup screen with a QR to join it. Point your phone's camera at it:
+
+![Scan the on-screen QR to join the Dashboards setup hotspot](docs/img/dashboards-onboard-qr.jpg)
+
+1. **Join the hotspot.** Scan the QR — your phone offers to join `reTerminal-xxxx` (open, no password)
+   — or pick it from your WiFi list.
+2. **Pick your network + location.** A captive page lists nearby **2.4 GHz** networks (the ESP32-S3
+   has no 5 GHz radio); choose yours and type the password, then set your location for the free,
+   key-less **Open-Meteo** weather — **type a city** (geocoded for you, with its DST-correct POSIX
+   timezone), pick one from the list, or enter lat/long + a timezone by hand.
+3. **(Optional) wireless updates.** Tick *Update over WiFi (OTA)* and choose your own password to make
+   the device flashable from the Arduino IDE's network port — so USB is only ever needed for the very
+   first flash.
+4. **Save.** Everything persists on the device (NVS); it reconnects and goes straight to the dashboard
+   on every future boot. To move it to a new network, hold **REFRESH** at power-on to re-onboard.
 
 Then **LEFT/RIGHT** switch between the LCARS, Classic Mac, and Linux-console styles.
-
-> **Roadmap — a zero-config release.** A packaged release build will fold in the **WiFiSetup**
-> captive-portal onboarding so there's **nothing to edit**: flash once, the device opens its own
-> hotspot and shows a QR, you join and pick your network from a phone web page, then choose your region
-> for weather — and you've got a standalone dashboard with no code changes and no reflash. The building
-> blocks already ship as their own examples (**WiFiSetup**, **WiFiQR**); today you set WiFi + region in
-> the sketch as above.
 
 ### Gallery (on the E1001)
 
