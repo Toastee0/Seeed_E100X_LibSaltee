@@ -5,7 +5,9 @@
 //   1  MAC      — classic Mac OS: white, a rounded window with a striped title bar, crisp 1-bit
 //   2  CONSOLE  — Linux terminal: black CRT, monospace "status" output in a box-drawn frame
 //
-// LEFT/RIGHT cycle the style; REFRESH forces a clean full refresh. Drawing goes into a GFXcanvas8
+// LEFT/RIGHT cycle the style; REFRESH forces a clean full refresh. LCARS updates with two quick 1-bit
+// partial refreshes per minute (the values row + the clock) and a clean 4-gray full page every 10 min.
+// Drawing goes into a GFXcanvas8
 // (1 byte/pixel) using gray levels 0(black)..3(white), then is copied to the panel buffer — so we get
 // Adafruit_GFX rounded-rects and text in true grayscale. Fill in WIFI_SSID/WIFI_PASS + LAT/LONG.
 // Board: XIAO_ESP32S3, OPI PSRAM, USB CDC On Boot = Enabled.
@@ -33,6 +35,8 @@ GFXcanvas8 cv(PANEL_W, PANEL_H);          // 4-gray drawing surface (color = lev
 
 float outTemp = NAN; float outHum = NAN; int wcode = -1; float inT = NAN, inH = NAN;
 int style = 0, lastMin = -1; uint32_t lastWeather = 0;
+// LCARS per-minute partial-refresh windows, set by renderLCARS(): the values row and the clock.
+int lcValsX, lcValsY, lcValsW, lcValsH, lcClkX, lcClkY, lcClkW, lcClkH;
 
 static const char* weatherText(int c) {
   if (c < 0) return "";
@@ -114,6 +118,7 @@ static void renderLCARS(const struct tm& t) {
     cv.setTextColor(3); cv.setTextSize(5);                       // values stay white on the black field
     cv.setCursor(cx + (cw - twidth(5, val[i])) / 2, valY); cv.print(val[i]);
   }
+  lcValsX = MX; lcValsY = valY - 4; lcValsW = MW; lcValsH = 5 * 8 + 8;   // per-minute partial window: values row
   // --- HQ bar: same row as the chrono tab, contiguous with it (like the header row + brand cap) ---
   cv.fillRoundRect(SB - 40, chronoY, PANEL_W - (SB - 40) - 8, PH, 14, 1);   // starts inside the rail (same shade)
   char sy[16]; strftime(sy, sizeof sy, "%d-%m-%y", &t);        // date only, no time
@@ -125,6 +130,7 @@ static void renderLCARS(const struct tm& t) {
   int clkX = MX + (MW - twidth(13, hm)) / 2;                   // center horizontally in the right region
   int clkY = (chronoY + PH + PANEL_H - 13 * 8) / 2;          // center vertically below the HQ bar
   cv.setCursor(clkX, clkY); cv.print(hm);
+  lcClkX = clkX - 4; lcClkY = clkY - 4; lcClkW = twidth(13, hm) + 8; lcClkH = 13 * 8 + 8;   // per-minute partial window: clock
   // --- left rail pips: 7 tabs evenly filling from the cap down to the bottom edge ---
   long rssi = WiFi.RSSI();
   lcarsPip(P0 + 0 * (PH + PG), PH, 2, "Location:",  LOCATION);
@@ -192,11 +198,18 @@ static void renderConsole(const struct tm& t) {
   cv.fillRect(16 + twidth(2, "admin@re-terminal:~$ "), y, 13, 22, FG);   // cursor block
 }
 
-static void draw(const struct tm& t) {
+static void draw(const struct tm& t, bool full) {
   if (io.readSHT4x(inT, inH)) {} else { inT = NAN; inH = NAN; }
   if (style == 1) renderMac(t); else if (style == 2) renderConsole(t); else renderLCARS(t);
   memcpy(epd.buffer(), cv.getBuffer(), (size_t)PANEL_W * PANEL_H);   // canvas levels -> panel buffer
-  epd.displayFull();
+  if (full || style != 0) {
+    epd.displayFull();                                              // crisp 4-gray full page
+  } else {
+    // LCARS off-minute: two quick 1-bit partial refreshes (values row + clock), no full-page flash.
+    // Both windows are white-on-black only, so the B&W partial projection never blackens any gray.
+    epd.partial(lcValsX, lcValsY, lcValsW, lcValsH);
+    epd.partial(lcClkX,  lcClkY,  lcClkW,  lcClkH);
+  }
 }
 
 void setup() {
@@ -207,17 +220,21 @@ void setup() {
   for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
   configTzTime(TZ, NTP_SERVER, "time.nist.gov");
   fetchWeather(); lastWeather = millis();
-  struct tm t; if (getLocalTime(&t, 8000)) { draw(t); lastMin = t.tm_min; }
+  struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; }
 }
 
 void loop() {
-  bool change = false;
-  if (io.leftPressed())  { style = (style + 2) % 3; change = true; }
-  if (io.rightPressed()) { style = (style + 1) % 3; change = true; }
-  if (io.refreshPressed()) change = true;
+  bool change = false, forceFull = false;
+  if (io.leftPressed())  { style = (style + 2) % 3; change = true; forceFull = true; }
+  if (io.rightPressed()) { style = (style + 1) % 3; change = true; forceFull = true; }
+  if (io.refreshPressed()) { change = true; forceFull = true; }
   struct tm t;
   if (!getLocalTime(&t, 500)) { delay(50); return; }
   if (millis() - lastWeather >= WEATHER_EVERY_MS) { fetchWeather(); lastWeather = millis(); }
-  if (change || t.tm_min != lastMin) { draw(t); lastMin = t.tm_min; }
+  if (change || t.tm_min != lastMin) {
+    // LCARS: quick partials every minute, clean full page every 10 min (and on style/refresh).
+    draw(t, forceFull || (t.tm_min % 10 == 0));
+    lastMin = t.tm_min;
+  }
   delay(50);
 }
