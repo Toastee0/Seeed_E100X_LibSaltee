@@ -19,8 +19,8 @@ using namespace ReTerminal;
 // ---- configure me ----
 const char* WIFI_SSID = "your-ssid";
 const char* WIFI_PASS = "your-password";
-const float LATITUDE  = 43.45f;        // your location
-const float LONGITUDE = -80.49f;
+const float LATITUDE  = 43.6532f;      // your location (default: downtown Toronto)
+const float LONGITUDE = -79.3832f;
 const char* TZ        = "EST5EDT,M3.2.0,M11.1.0";   // POSIX TZ string
 const long  WEATHER_EVERY_MS = 600000; // refresh outdoor weather every 10 min
 
