@@ -8,6 +8,12 @@ partial refresh** of an arbitrary window (~0.4–1.5 s) — so you can update ju
 changed instead of waiting ~4 s for a full refresh every time. The colour **E1002** (Spectra-6)
 is driven through GxEPD2 with the board's pin map and a raw-frame blit helper.
 
+![NetScan in heatmap mode on the reTerminal E1001](docs/img/netscan-heatmap.jpg)
+
+*The **NetScan** example on the mono E1001: a 4-level-gray "heatmap" of the local /24 — each cell
+darkens the longer since that host was last seen — with the live legend, an `as of` timestamp, and
+uptime in the header. Built entirely from the panel's grayscale + partial-refresh primitives.*
+
 > Born out of the [Saltee](https://github.com/Toastee0/saltee) lab-dashboard project and shared
 > back to the community — Seeed put these panels in our hands, so here's a clean, reusable
 > firmware set in return. GPL-3.0, same spirit as the GxEPD2 driver it builds on.
@@ -88,6 +94,13 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **Dashboard** | a config-driven **widget engine** — boxes, bars, values, text, QR — each with a bounding box + fast-refresh flag, designed in a browser (`extras/dashboard.html`). See [`docs/WIDGETS.md`](docs/WIDGETS.md). |
 | **WiFiQR** | a "scan to join my WiFi" QR, generated **on-device** from the credentials it already knows (`WiFi.SSID()`/`WiFi.psk()`) — uses the ESP32 core's built-in QR encoder, no extra library. |
 | **WiFiSetup** | **no-code, no-serial onboarding**: captive-portal WiFi setup with on-screen status + a QR to join the device's setup hotspot. Hold Refresh at boot to re-provision. |
+
+### Gallery (on the E1001)
+
+| NetScan — labeled grid | NetScan — heatmap | WiFiSetup |
+|---|---|---|
+| ![NetScan labeled grid](docs/img/netscan-labeled.jpg) | ![NetScan heatmap](docs/img/netscan-heatmap.jpg) | ![WiFiSetup connected screen](docs/img/wifisetup.jpg) |
+| Octet shown for hosts seen in the window, black block for those that aren't; the grid fills in row-by-row via partial refresh as the sweep runs. | Press **REFRESH** to switch to the 4-level-gray recency map (2 h per shade, black past 6 h). | No-serial onboarding — the device shows its IP and a join QR once it's on WiFi. |
 
 ## On-board peripherals
 
