@@ -9,29 +9,48 @@
 // partials per minute (the clock + any data value that changed) and a clean 4-gray full page every 10 min.
 // Drawing goes into a GFXcanvas8
 // (1 byte/pixel) using gray levels 0(black)..3(white), then is copied to the panel buffer — so we get
-// Adafruit_GFX rounded-rects and text in true grayscale. Fill in WIFI_SSID/WIFI_PASS + LAT/LONG.
+// Adafruit_GFX rounded-rects and text in true grayscale.
+//
+// ZERO-CONFIG ONBOARDING (no creds in source): on first boot — or whenever the Refresh button is
+// HELD at power-on — the device opens its own WiFi hotspot and shows an LCARS-styled QR + steps on
+// the e-paper. Join it from a phone, a captive page lists nearby networks; pick yours, type the
+// password, choose a city (or enter lat/long + a timezone). WiFi creds + location + POSIX TZ are
+// saved to NVS, and every boot after that goes straight to the dashboard. To move it to a new
+// network, hold Refresh at power-on to re-open setup.
 // Board: XIAO_ESP32S3, OPI PSRAM, USB CDC On Boot = Enabled.
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <time.h>
 #include <Adafruit_GFX.h>
 #include <ReTerminalMono.h>
+#include <ReTerminalQR.h>
 #include <ReTerminalPeripherals.h>
+#include "regions.h"
 using namespace ReTerminal;
 
-const char* WIFI_SSID = "your-ssid";
-const char* WIFI_PASS = "your-password";
-const float LATITUDE  = 43.6532f;        // default: downtown Toronto
-const float LONGITUDE = -79.3832f;
-const char* LOCATION  = "Toronto";       // shown on the LCARS rail
 const char* NTP_SERVER = "pool.ntp.org"; // time source ("HQ"); shown on the LCARS info line
-const char* TZ = "EST5EDT,M3.2.0,M11.1.0";
 const uint32_t WEATHER_EVERY_MS = 600000;
+
+// Runtime configuration, loaded from NVS (namespace "dash") by loadConfig() / written by the setup
+// portal. No network credentials or location are ever hardcoded here — defaults below only apply
+// before onboarding, and the device won't reach the dashboard until cfgSsid is set.
+String cfgSsid = "", cfgPass = "";
+String cfgLoc  = "Toronto";              // shown on the LCARS rail
+float  cfgLat  = 43.6532f, cfgLon = -79.3832f;
+String cfgTz   = "EST5EDT,M3.2.0,M11.1.0";
 
 Mono epd;
 Peripherals io;
 GFXcanvas8 cv(PANEL_W, PANEL_H);          // 4-gray drawing surface (color = level 0..3)
+Preferences prefs;
+WebServer  web(80);
+DNSServer  dns;
+String     apName;                        // SoftAP SSID shown during onboarding
+bool       g_portal = false;              // true while the captive setup portal is running
 
 float outTemp = NAN; float outHum = NAN; int wcode = -1; float inT = NAN, inH = NAN;
 int style = 0, lastMin = -1; uint32_t lastWeather = 0;
@@ -53,8 +72,8 @@ static void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
   WiFiClientSecure client; client.setInsecure();
   HTTPClient http;
-  String url = "https://api.open-meteo.com/v1/forecast?latitude=" + String(LATITUDE, 4) +
-               "&longitude=" + String(LONGITUDE, 4) + "&current=temperature_2m,relative_humidity_2m,weather_code";
+  String url = "https://api.open-meteo.com/v1/forecast?latitude=" + String(cfgLat, 4) +
+               "&longitude=" + String(cfgLon, 4) + "&current=temperature_2m,relative_humidity_2m,weather_code";
   if (!http.begin(client, url)) return;
   if (http.GET() == 200) {
     String b = http.getString();
@@ -144,7 +163,7 @@ static void renderLCARS(const struct tm& t) {
     lcClk[2] = twidth(13, hm) + 2 * cpadX; lcClk[3] = cgh + 2 * cpadY; }
   // --- left rail pips: 7 tabs evenly filling from the cap down to the bottom edge ---
   long rssi = WiFi.RSSI();
-  lcarsPip(P0 + 0 * (PH + PG), PH, 2, "Location:",  LOCATION);
+  lcarsPip(P0 + 0 * (PH + PG), PH, 2, "Location:",  cfgLoc);
   lcarsPip(P0 + 1 * (PH + PG), PH, 3, "Weather:",   weatherText(wcode));
   lcarsPip(P0 + 2 * (PH + PG), PH, 1, "Chrono:",    "RTC/NTP");
   lcarsPip(P0 + 3 * (PH + PG), PH, 3, "WiFi RSSI:", String(rssi) + " db");
@@ -209,6 +228,169 @@ static void renderConsole(const struct tm& t) {
   cv.fillRect(16 + twidth(2, "admin@re-terminal:~$ "), y, 13, 22, FG);   // cursor block
 }
 
+// ============================== CONFIG (NVS) ==============================
+static void loadConfig() {
+  prefs.begin("dash", true);                                   // read-only
+  cfgSsid = prefs.getString("ssid", "");
+  cfgPass = prefs.getString("pass", "");
+  cfgLoc  = prefs.getString("loc",  "Toronto");
+  cfgLat  = prefs.getFloat ("lat",  43.6532f);
+  cfgLon  = prefs.getFloat ("lon",  -79.3832f);
+  cfgTz   = prefs.getString("tz",   "EST5EDT,M3.2.0,M11.1.0");
+  prefs.end();
+}
+
+// ============================== LCARS onboarding screens ==============================
+// The setup/connecting/failed screens reuse the LCARS visual language (brand cap + top bar + rail
+// pips) so onboarding looks like the product, not a bare debug page. Drawn in 4-gray on the canvas;
+// the join-QR is composited straight into the panel buffer (pure black/white) before the full push.
+static void lcChrome(const String& title) {
+  cv.fillScreen(0);                                            // black field
+  const int TBY = 6, CAPH = 76, SB = RAIL_W;
+  cv.fillRoundRect(0, TBY, SB, CAPH, 26, 2);                  // brand cap
+  cv.fillRect(0, TBY + 26, 26, CAPH - 26, 2);                 // square its bottom-left
+  cv.fillRoundRect(SB - 40, TBY, PANEL_W - (SB - 40) - 8, CAPH, 14, 2);   // top bar, contiguous with cap
+  cv.setTextColor(0); cv.setTextSize(3);
+  cv.setCursor(16, TBY + 9);  cv.print("LCARS");
+  cv.setCursor(16, TBY + 41); cv.print("SALT0");
+  cv.setTextColor(0); cv.setTextSize(4);                       // screen title, black on the gray bar
+  cv.setCursor(SB + 8, TBY + 24); cv.print(title);
+}
+static void lcFlush(const char* qr = nullptr, int qx = 540, int qy = 116, int qs = 220) {
+  memcpy(epd.buffer(), cv.getBuffer(), (size_t)PANEL_W * PANEL_H);   // canvas levels -> panel buffer
+  if (qr) ReTerminal::drawQR(epd.buffer(), epd.width(), qr, qx, qy, qs, qs);
+  epd.displayFull();
+}
+// Body text lines in the open region, left of where the QR sits.
+static void lcBody(const String* lines, int n, int x = RAIL_W + 8, int y0 = 130, int lh = 40) {
+  cv.setTextColor(3); cv.setTextSize(3);
+  for (int i = 0; i < n; i++) { cv.setCursor(x, y0 + i * lh); cv.print(lines[i]); }
+}
+static void lcFooter(const String& s) {
+  cv.setTextColor(3); cv.setTextSize(2); cv.setCursor(8, 456); cv.print(s);   // full-width under the short rail
+}
+
+static void screenSetup() {                                   // SoftAP up: how to onboard + join QR
+  lcChrome("WIFI SETUP");
+  const int P0 = 88, PH = 52, PG = 4;
+  lcarsPip(P0 + 0 * (PH + PG), PH, 2, "MODE",   "SETUP");
+  lcarsPip(P0 + 1 * (PH + PG), PH, 3, "RADIO",  "HOTSPOT");
+  lcarsPip(P0 + 2 * (PH + PG), PH, 1, "SECURE", "OPEN");
+  lcarsPip(P0 + 3 * (PH + PG), PH, 3, "PORTAL", "1.4.1");
+  String lines[] = {
+    "1. On your phone,",
+    "   join the WiFi:",
+    "   " + apName,
+    "   (or scan ->)",
+    "2. A page opens;",
+    "   pick your WiFi,",
+    "   set your city.",
+  };
+  lcBody(lines, 7);
+  lcFooter("Open hotspot - no password to join. Then browse to 192.168.4.1");
+  char joinQR[64];
+  ReTerminal::wifiQRPayload(joinQR, sizeof(joinQR), apName.c_str(), "", "nopass");
+  lcFlush(joinQR);
+}
+static void screenConnecting(const String& ssid) {
+  lcChrome("CONNECTING");
+  const int P0 = 88, PH = 52, PG = 4;
+  lcarsPip(P0 + 0 * (PH + PG), PH, 2, "MODE",  "JOIN");
+  lcarsPip(P0 + 1 * (PH + PG), PH, 3, "STATE", "LINK");
+  String lines[] = { "Network:", "   " + ssid, "", "Standby ..." };
+  lcBody(lines, 4);
+  lcFlush();
+}
+static void screenFailed(const String& ssid) {
+  lcChrome("WIFI FAILED");
+  const int P0 = 88, PH = 52, PG = 4;
+  lcarsPip(P0 + 0 * (PH + PG), PH, 3, "STATE", "NO LINK");
+  String lines[] = { "Could not join:", "   " + ssid, "", "Re-opening setup" };
+  lcBody(lines, 4);
+  lcFlush();
+}
+
+// ============================== captive-portal web pages ==============================
+static String formPage() {
+  String s = F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+               "<title>reTerminal setup</title><style>"
+               "body{font-family:system-ui,sans-serif;max-width:430px;margin:20px auto;padding:0 14px;"
+               "background:#000;color:#fc9}"
+               "h2{color:#f90;border-bottom:3px solid #f90;padding-bottom:6px}"
+               "label{display:block;margin:12px 0 2px;color:#9cf;font-weight:600}"
+               "select,input{width:100%;font-size:1.05em;padding:9px;box-sizing:border-box;"
+               "border:0;border-radius:6px;background:#222;color:#fff}"
+               "button{width:100%;font-size:1.1em;padding:12px;margin:18px 0;border:0;border-radius:18px;"
+               "background:#f90;color:#000;font-weight:700}"
+               ".hint{color:#888;font-size:.82em;margin:2px 0}"
+               "#custom{display:none}</style>"
+               "<h2>reTerminal WiFi setup</h2><form method=POST action=/save>"
+               "<label>Your WiFi network</label><select name=ssid>");
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) s += "<option>" + WiFi.SSID(i) + "</option>";
+  s += F("</select><label>WiFi password</label><input name=pass type=password>"
+         "<label>Location (for weather &amp; clock)</label>"
+         "<select name=city onchange=\"document.getElementById('custom').style.display="
+         "this.value=='custom'?'block':'none'\"><option value=''>-- pick a city --</option>");
+  for (int i = 0; i < REGION_NCITIES; i++)
+    s += "<option value=" + String(i) + (String(REGION_CITIES[i].name) == cfgLoc ? " selected" : "") +
+         ">" + REGION_CITIES[i].name + "</option>";
+  s += F("<option value=custom>Custom (enter lat/long)...</option></select>"
+         "<div id=custom><label>Place name</label><input name=loc>"
+         "<label>Latitude</label><input name=lat type=number step=any placeholder='43.65'>"
+         "<label>Longitude</label><input name=lon type=number step=any placeholder='-79.38'>"
+         "<p class=hint>Tip: long-press your spot in a maps app to copy its coordinates.</p>"
+         "<label>Timezone</label><select name=tz>");
+  for (int i = 0; i < REGION_NZONES; i++)
+    s += "<option value=" + String(i) + ">" + REGION_ZONES[i].label + "</option>";
+  s += F("</select></div>"
+         "<button type=submit>Save &amp; connect</button></form>");
+  return s;
+}
+
+static void handleSave() {
+  String ssid = web.arg("ssid"), pass = web.arg("pass");
+  // Location: a chosen city fills lat/long + TZ from the table; "custom" uses the typed fields.
+  String loc = cfgLoc, tz = cfgTz; float lat = cfgLat, lon = cfgLon;
+  String city = web.arg("city");
+  if (city.length() && city != "custom") {
+    int i = city.toInt();
+    if (i >= 0 && i < REGION_NCITIES) {
+      loc = REGION_CITIES[i].name; lat = REGION_CITIES[i].lat;
+      lon = REGION_CITIES[i].lon;  tz  = REGION_CITIES[i].tz;
+    }
+  } else if (city == "custom") {
+    loc = web.arg("loc"); if (!loc.length()) loc = "Custom";
+    lat = web.arg("lat").toFloat(); lon = web.arg("lon").toFloat();
+    int z = web.arg("tz").toInt();
+    if (z >= 0 && z < REGION_NZONES) tz = REGION_ZONES[z].tz;
+  }
+  prefs.begin("dash", false);
+  prefs.putString("ssid", ssid); prefs.putString("pass", pass);
+  prefs.putString("loc",  loc);  prefs.putFloat("lat", lat);
+  prefs.putFloat ("lon",  lon);  prefs.putString("tz",  tz);
+  prefs.end();
+  web.send(200, "text/html",
+           F("<meta name=viewport content='width=device-width'><body style='font-family:system-ui;"
+             "background:#000;color:#fc9;text-align:center;margin-top:60px'>"
+             "<h2 style='color:#f90'>Saved &mdash; connecting&hellip;</h2>"
+             "<p>You can close this page. The display will show the dashboard shortly.</p>"));
+  delay(800);
+  ESP.restart();
+}
+
+static void startPortal() {
+  g_portal = true;
+  WiFi.mode(WIFI_AP_STA);                                      // AP for the portal, STA so we can scan
+  WiFi.softAP(apName.c_str());                                 // open AP — easy to join
+  dns.start(53, "*", WiFi.softAPIP());                         // captive: every lookup -> us
+  web.onNotFound([] { web.send(200, "text/html", formPage()); });
+  web.on("/", [] { web.send(200, "text/html", formPage()); });
+  web.on("/save", HTTP_POST, handleSave);
+  web.begin();
+  screenSetup();                                               // tell the user what to do, on-screen
+}
+
 static void draw(const struct tm& t, bool full) {
   if (io.readSHT4x(inT, inH)) {} else { inT = NAN; inH = NAN; }
   if (style == 1) renderMac(t); else if (style == 2) renderConsole(t); else renderLCARS(t);
@@ -229,14 +411,26 @@ void setup() {
   Serial.begin(115200); delay(200);
   io.begin();
   if (!epd.begin()) { Serial.println("PSRAM alloc failed — enable OPI PSRAM"); while (true) delay(1000); }
-  WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  uint8_t mac[6]; WiFi.macAddress(mac);
+  apName = "reTerminal-" + String(mac[4], HEX) + String(mac[5], HEX);
+  loadConfig();
+  bool forceSetup = (digitalRead(PIN_BTN_REFRESH) == LOW);     // hold Refresh at boot to re-onboard
+
+  if (!cfgSsid.length() || forceSetup) { startPortal(); return; }   // no creds / forced -> onboarding
+
+  screenConnecting(cfgSsid);
+  WiFi.mode(WIFI_STA); WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
   for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
-  configTzTime(TZ, NTP_SERVER, "time.nist.gov");
+  if (WiFi.status() != WL_CONNECTED) { screenFailed(cfgSsid); delay(1500); startPortal(); return; }
+
+  configTzTime(cfgTz.c_str(), NTP_SERVER, "time.nist.gov");
   fetchWeather(); lastWeather = millis();
   struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; }
 }
 
 void loop() {
+  if (g_portal) { dns.processNextRequest(); web.handleClient(); return; }   // onboarding: just serve the portal
   bool change = false, forceFull = false;
   if (io.leftPressed())  { style = (style + 2) % 3; change = true; forceFull = true; }
   if (io.rightPressed()) { style = (style + 1) % 3; change = true; forceFull = true; }
