@@ -60,6 +60,24 @@ static void tempBadge(int x, int y, int w, int h, float t) {
   uint8_t sz = 6; text(x + (w - tw(sz, b)) / 2, y + (h - 8 * sz) / 2, sz, contrastOn(c), b);
 }
 
+// A blue teardrop (circle body + pointed top), top at topY, body radius r.
+static void droplet(int cx, int topY, int r, uint16_t col) {
+  display.fillCircle(cx, topY + r + r / 2, r, col);
+  display.fillTriangle(cx - r, topY + r, cx + r, topY + r, cx, topY, col);
+}
+// Humidity gauge: droplet + a pill bar that fills blue to the reading + the % — a level you can read
+// at a glance, matching the weight of the temp badge instead of plain corner text.
+static void humidityBar(int x, int y, int w, float hum) {
+  droplet(x + 10, y + 1, 8, GxEPD_BLUE);
+  char b[12]; if (isnan(hum)) strcpy(b, "--"); else snprintf(b, sizeof b, "%d%%", (int)lroundf(hum));
+  int lw = tw(3, b);
+  text(x + w - lw, y + 2, 3, GxEPD_BLUE, b);
+  int bx = x + 30, bw = w - 30 - lw - 14, by = y + 2, bh = 20;
+  display.drawRoundRect(bx, by, bw, bh, bh / 2, GxEPD_BLACK);
+  int fw = isnan(hum) ? 0 : (int)((bw - 4) * (hum / 100.0f));
+  if (fw > 4) display.fillRoundRect(bx + 2, by + 2, fw, bh - 4, (bh - 4) / 2, GxEPD_BLUE);
+}
+
 // ---- analog clock ----
 // A tapered hand drawn as a triangle from a base segment across the hub to the tip.
 static void hand(int cx, int cy, int len, float deg, int halfW, int back, uint16_t col) {
@@ -133,13 +151,13 @@ static void render() {
   weatherIcon(X + 62, 162, 30, wcode);
   textC(X + 62, 220, 2, GxEPD_BLACK, weatherText(wcode));
   tempBadge(X + W - 184, 104, 168, 96, outT);
-  { char b[16]; snprintf(b, sizeof b, "%d%% RH", (int)lroundf(outH)); text(X + W - tw(2, b) - 16, 246, 2, GxEPD_BLUE, b); }
+  humidityBar(X + 16, 242, W - 32, outH);
 
-  // indoor card: colour temp badge left, humidity right
+  // indoor card: colour temp badge + humidity gauge
   display.drawRect(X, 286, W, 144, GxEPD_BLACK); display.drawRect(X + 1, 287, W - 2, 142, GxEPD_BLACK);
   text(X + 16, 298, 2, GxEPD_BLACK, "INDOOR");
-  tempBadge(X + 16, 326, 168, 88, inT);
-  { char b[16]; snprintf(b, sizeof b, "%d%% RH", (int)lroundf(inH)); text(X + W - tw(2, b) - 16, 362, 2, GxEPD_BLUE, b); }
+  tempBadge(X + 16, 322, 168, 64, inT);
+  humidityBar(X + 16, 398, W - 32, inH);
 
   // footer: battery (coloured) + wifi placeholder
   uint16_t bc = batt > 50 ? GxEPD_GREEN : batt > 20 ? GxEPD_YELLOW : GxEPD_RED;
