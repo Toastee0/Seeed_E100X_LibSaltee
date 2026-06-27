@@ -35,6 +35,10 @@ using namespace ReTerminal;
 
 const char* NTP_SERVER = "pool.ntp.org"; // time source ("HQ"); shown on the LCARS info line
 const uint32_t WEATHER_EVERY_MS = 600000;
+// The on-board SHT4x sits inside the warm enclosure (ESP32-S3 + radio + e-paper self-heat), so the
+// indoor temperature reads high. Subtract a fixed self-heating offset. Value from a thermal-camera
+// reading of the running unit: body center 24.3 C vs ambient (scene min) 22.4 C => ~1.9 C rise.
+const float INDOOR_TEMP_OFFSET = 1.9f;
 
 // Runtime configuration, loaded from NVS (namespace "dash") by loadConfig() / written by the setup
 // portal. No network credentials or location are ever hardcoded here — defaults below only apply
@@ -593,7 +597,7 @@ static void beginOTA() {
 }
 
 static void draw(const struct tm& t, bool full) {
-  if (io.readSHT4x(inT, inH)) {} else { inT = NAN; inH = NAN; }
+  if (io.readSHT4x(inT, inH)) { inT -= INDOOR_TEMP_OFFSET; } else { inT = NAN; inH = NAN; }   // correct self-heating
   if (style == 1) renderMac(t); else if (style == 2) renderConsole(t); else renderLCARS(t);
   memcpy(epd.buffer(), cv.getBuffer(), (size_t)PANEL_W * PANEL_H);   // canvas levels -> panel buffer
   if (full) { epd.displayFull(); return; }                          // crisp 4-gray full page (clears ghosting)
