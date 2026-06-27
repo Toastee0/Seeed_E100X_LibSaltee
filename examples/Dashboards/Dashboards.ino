@@ -5,8 +5,8 @@
 //   1  MAC      — classic Mac OS: white, a rounded window with a striped title bar, crisp 1-bit
 //   2  CONSOLE  — Linux terminal: black CRT, monospace "status" output in a box-drawn frame
 //
-// LEFT/RIGHT cycle the style; REFRESH forces a clean full refresh. LCARS updates with two quick 1-bit
-// partial refreshes per minute (the values row + the clock) and a clean 4-gray full page every 10 min.
+// LEFT/RIGHT cycle the style; REFRESH forces a clean full refresh. LCARS updates with quick 1-bit
+// partials per minute (one tight box per data value + the clock) and a clean 4-gray full page every 10 min.
 // Drawing goes into a GFXcanvas8
 // (1 byte/pixel) using gray levels 0(black)..3(white), then is copied to the panel buffer — so we get
 // Adafruit_GFX rounded-rects and text in true grayscale. Fill in WIFI_SSID/WIFI_PASS + LAT/LONG.
@@ -35,8 +35,10 @@ GFXcanvas8 cv(PANEL_W, PANEL_H);          // 4-gray drawing surface (color = lev
 
 float outTemp = NAN; float outHum = NAN; int wcode = -1; float inT = NAN, inH = NAN;
 int style = 0, lastMin = -1; uint32_t lastWeather = 0;
-// LCARS per-minute partial-refresh windows, set by renderLCARS(): the values row and the clock.
-int lcValsX, lcValsY, lcValsW, lcValsH, lcClkX, lcClkY, lcClkW, lcClkH;
+// LCARS per-minute quick-refresh windows, set by renderLCARS(): one tight box per data value + the
+// clock, each vertically centered about its text so the partial-refresh border sits symmetrically.
+int lcVal[4][4];   // [i] = {x, y, w, h}
+int lcClk[4];      // {x, y, w, h}
 
 static const char* weatherText(int c) {
   if (c < 0) return "";
@@ -110,15 +112,19 @@ static void renderLCARS(const struct tm& t) {
                     isnan(inH)     ? "--" : String(iround(inH))     + "%" };
   int cw = MW / 4;
   const int valY = (TBY + TBH + chronoY - 5 * 8) / 2;        // centered between top bar & HQ bar
+  const int vGlyphH = 7 * 5, vPadX = 8, vPadY = 7;           // size-5 ink height + symmetric padding
   for (int i = 0; i < 4; i++) {
     int cx = MX + i * cw;
     cv.setTextColor(0); cv.setTextSize(2);                       // black text on the gray bar (larger now)
     cv.setCursor(cx + (cw - twidth(2, h1[i])) / 2, TBY + 18); cv.print(h1[i]);   // two lines fill the tall bar (centered, up 1px)
     cv.setCursor(cx + (cw - twidth(2, h2[i])) / 2, TBY + 40); cv.print(h2[i]);
     cv.setTextColor(3); cv.setTextSize(5);                       // values stay white on the black field
-    cv.setCursor(cx + (cw - twidth(5, val[i])) / 2, valY); cv.print(val[i]);
+    int vw = twidth(5, val[i]), vx = cx + (cw - vw) / 2;
+    cv.setCursor(vx, valY); cv.print(val[i]);
+    // quick-refresh window: tight box per value, vertically centered about its glyph
+    lcVal[i][0] = vx - vPadX;          lcVal[i][1] = valY - vPadY;
+    lcVal[i][2] = vw + 2 * vPadX;      lcVal[i][3] = vGlyphH + 2 * vPadY;
   }
-  lcValsX = MX; lcValsY = valY - 4; lcValsW = MW; lcValsH = 5 * 8 + 8;   // per-minute partial window: values row
   // --- HQ bar: same row as the chrono tab, contiguous with it (like the header row + brand cap) ---
   cv.fillRoundRect(SB - 40, chronoY, PANEL_W - (SB - 40) - 8, PH, 14, 1);   // starts inside the rail (same shade)
   char sy[16]; strftime(sy, sizeof sy, "%d-%m-%y", &t);        // date only, no time
@@ -130,7 +136,9 @@ static void renderLCARS(const struct tm& t) {
   int clkX = MX + (MW - twidth(13, hm)) / 2;                   // center horizontally in the right region
   int clkY = (chronoY + PH + PANEL_H - 13 * 8) / 2;          // center vertically below the HQ bar
   cv.setCursor(clkX, clkY); cv.print(hm);
-  lcClkX = clkX - 4; lcClkY = clkY - 4; lcClkW = twidth(13, hm) + 8; lcClkH = 13 * 8 + 8;   // per-minute partial window: clock
+  { const int cgh = 7 * 13, cpadX = 8, cpadY = 10;            // clock quick-refresh box, centered about the glyph
+    lcClk[0] = clkX - cpadX;            lcClk[1] = clkY - cpadY;
+    lcClk[2] = twidth(13, hm) + 2 * cpadX; lcClk[3] = cgh + 2 * cpadY; }
   // --- left rail pips: 7 tabs evenly filling from the cap down to the bottom edge ---
   long rssi = WiFi.RSSI();
   lcarsPip(P0 + 0 * (PH + PG), PH, 2, "Location:",  LOCATION);
@@ -205,10 +213,11 @@ static void draw(const struct tm& t, bool full) {
   if (full || style != 0) {
     epd.displayFull();                                              // crisp 4-gray full page
   } else {
-    // LCARS off-minute: two quick 1-bit partial refreshes (values row + clock), no full-page flash.
-    // Both windows are white-on-black only, so the B&W partial projection never blackens any gray.
-    epd.partial(lcValsX, lcValsY, lcValsW, lcValsH);
-    epd.partial(lcClkX,  lcClkY,  lcClkW,  lcClkH);
+    // LCARS off-minute: quick 1-bit partials — one tight box per data value + the clock, each
+    // centered about its text so the refresh border sits symmetrically. No full-page flash.
+    // All windows are white-on-black only, so the B&W partial projection never blackens any gray.
+    for (int i = 0; i < 4; i++) epd.partial(lcVal[i][0], lcVal[i][1], lcVal[i][2], lcVal[i][3]);
+    epd.partial(lcClk[0], lcClk[1], lcClk[2], lcClk[3]);
   }
 }
 
