@@ -24,14 +24,18 @@ float outT = 26, outH = 43;  int wcode = 0;     // 0 = clear
 float inT  = 27, inH  = 43;
 int hh = 17, mm = 54, batt = 100;
 
-// Map a temperature (C) to one of the six inks — cold blue .. hot red.
+// Map a temperature (C) to one of the six inks — cold blue / cool green / warm yellow / hot red.
+// Used as a BADGE FILL (not text on white), so yellow is fine here with dark text over it.
 static uint16_t tempColor(float t) {
-  if (isnan(t)) return GxEPD_BLACK;
-  if (t <  2)  return GxEPD_BLUE;
-  if (t < 13)  return GxEPD_GREEN;
-  if (t < 23)  return GxEPD_BLACK;     // mild = neutral ink so it stays legible
-  if (t < 29)  return GxEPD_YELLOW;
+  if (isnan(t)) return GxEPD_WHITE;
+  if (t <  5)  return GxEPD_BLUE;
+  if (t < 22)  return GxEPD_GREEN;
+  if (t < 28)  return GxEPD_YELLOW;
   return GxEPD_RED;
+}
+// Legible text colour for a given background ink: dark on light inks, white on dark ones.
+static uint16_t contrastOn(uint16_t ink) {
+  return (ink == GxEPD_YELLOW || ink == GxEPD_WHITE) ? GxEPD_BLACK : GxEPD_WHITE;
 }
 static const char* weatherText(int c) {
   if (c == 0) return "Clear"; if (c <= 3) return "Cloudy"; if (c <= 48) return "Fog";
@@ -45,6 +49,16 @@ static void text(int x, int y, uint8_t size, uint16_t col, const char* s) {
   display.setTextSize(size); display.setTextColor(col); display.setCursor(x, y); display.print(s);
 }
 static void textC(int cx, int y, uint8_t size, uint16_t col, const char* s) { text(cx - tw(size, s) / 2, y, size, col, s); }
+
+// A filled colour "temperature badge": the ink shows the heat, big value in a contrasting colour
+// centered on it. Keeps colour bold while staying legible (no yellow-on-white).
+static void tempBadge(int x, int y, int w, int h, float t) {
+  uint16_t c = tempColor(t);
+  display.fillRoundRect(x, y, w, h, 14, c);
+  display.drawRoundRect(x, y, w, h, 14, GxEPD_BLACK);
+  char b[16]; if (isnan(t)) strcpy(b, "--"); else snprintf(b, sizeof b, "%dC", (int)lroundf(t));
+  uint8_t sz = 6; text(x + (w - tw(sz, b)) / 2, y + (h - 8 * sz) / 2, sz, contrastOn(c), b);
+}
 
 // ---- analog clock ----
 // A tapered hand drawn as a triangle from a base segment across the hub to the tip.
@@ -78,11 +92,12 @@ static void clock(int cx, int cy, int r, int H, int M) {
 static void weatherIcon(int cx, int cy, int r, int code) {
   const char* w = weatherText(code);
   bool cloud = (code >= 1 && code <= 48) || (code >= 51);
-  if (code == 0) {                                                            // clear -> sun
+  if (code == 0) {                                                            // clear -> sun (black rays/outline so yellow reads on white)
     for (int i = 0; i < 12; i++) { float th = i * 30 * PI / 180.0f;
       for (int o = -1; o <= 1; o++) display.drawLine(cx + cosf(th) * (r + 4), cy + sinf(th) * (r + 4) + o,
-                                                     cx + cosf(th) * (r + 16), cy + sinf(th) * (r + 16) + o, GxEPD_YELLOW); }
+                                                     cx + cosf(th) * (r + 15), cy + sinf(th) * (r + 15) + o, GxEPD_BLACK); }
     display.fillCircle(cx, cy, r, GxEPD_YELLOW);
+    display.drawCircle(cx, cy, r, GxEPD_BLACK);
     return;
   }
   if (cloud) {                                                               // cloud body (white w/ black outline)
@@ -112,23 +127,19 @@ static void render() {
 
   // right column: outdoor + indoor cards
   const int X = 452, W = PANEL_W - X - 12;
-  // outdoor card
+  // outdoor card: weather icon + condition left, colour temp badge right, humidity bottom
   display.drawRect(X, 74, W, 200, GxEPD_BLACK); display.drawRect(X + 1, 75, W - 2, 198, GxEPD_BLACK);
   text(X + 16, 86, 2, GxEPD_BLACK, "OUTDOOR");
-  weatherIcon(X + 60, 165, 34, wcode);
-  { char b[16]; snprintf(b, sizeof b, "%d", (int)lroundf(outT));
-    text(X + W - tw(7, b) - 50, 120, 7, tempColor(outT), b);
-    text(X + W - 44, 120, 4, tempColor(outT), "C"); }
-  textC(X + 65, 230, 2, GxEPD_BLACK, weatherText(wcode));
-  { char b[16]; snprintf(b, sizeof b, "%d%% RH", (int)lroundf(outH)); text(X + W - tw(2, b) - 16, 240, 2, GxEPD_BLUE, b); }
+  weatherIcon(X + 62, 162, 30, wcode);
+  textC(X + 62, 220, 2, GxEPD_BLACK, weatherText(wcode));
+  tempBadge(X + W - 184, 104, 168, 96, outT);
+  { char b[16]; snprintf(b, sizeof b, "%d%% RH", (int)lroundf(outH)); text(X + W - tw(2, b) - 16, 246, 2, GxEPD_BLUE, b); }
 
-  // indoor card
+  // indoor card: colour temp badge left, humidity right
   display.drawRect(X, 286, W, 144, GxEPD_BLACK); display.drawRect(X + 1, 287, W - 2, 142, GxEPD_BLACK);
   text(X + 16, 298, 2, GxEPD_BLACK, "INDOOR");
-  { char b[16]; snprintf(b, sizeof b, "%d", (int)lroundf(inT));
-    text(X + 20, 330, 7, tempColor(inT), b);
-    text(X + 20 + tw(7, b), 330, 4, tempColor(inT), "C"); }
-  { char b[16]; snprintf(b, sizeof b, "%d%% RH", (int)lroundf(inH)); text(X + W - tw(2, b) - 16, 398, 2, GxEPD_BLUE, b); }
+  tempBadge(X + 16, 326, 168, 88, inT);
+  { char b[16]; snprintf(b, sizeof b, "%d%% RH", (int)lroundf(inH)); text(X + W - tw(2, b) - 16, 362, 2, GxEPD_BLUE, b); }
 
   // footer: battery (coloured) + wifi placeholder
   uint16_t bc = batt > 50 ? GxEPD_GREEN : batt > 20 ? GxEPD_YELLOW : GxEPD_RED;
