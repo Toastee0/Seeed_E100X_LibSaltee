@@ -571,15 +571,16 @@ void setup() {
   const char* tzApply = (cfgTz == "auto") ? "UTC0" : cfgTz.c_str();
   configTzTime(tzApply, NTP_SERVER, "time.nist.gov");         // kick off NTP (non-blocking)
 
-  // Show the dashboard immediately — don't sit on the CONNECTING screen waiting for NTP/weather.
-  // The clock/date render as "--" until the first sync; values fill in as data arrives.
-  struct tm t0; bool have0 = getLocalTime(&t0, 0);
-  draw(t0, true);                                             // dashboard on screen NOW (placeholders)
-  lastMin = have0 ? t0.tm_min : -1;                           // -1 => loop forces a full paint once NTP lands
+  // Fetch weather BEFORE the first paint. A full refresh is ~4s and blocks, so painting first would
+  // strand the weather fetch behind it (that was the temp/humidity lag). The SHT4x indoor read runs
+  // inside draw(), so the very first paint already carries outdoor weather AND indoor temp/hum —
+  // only the clock waits on NTP, showing "--:--" until it syncs.
+  fetchWeather(); lastWeather = millis();
 
-  fetchWeather(); lastWeather = millis();                     // fetch while we wait for the clock
-  struct tm t;
-  if (getLocalTime(&t, have0 ? 0 : 8000)) { draw(t, true); lastMin = t.tm_min; }   // real time + fresh weather
+  struct tm t0; bool have0 = getLocalTime(&t0, 0);
+  draw(t0, true);                                             // dashboard on screen NOW: data present, clock "--:--"
+  lastMin = have0 ? t0.tm_min : -1;                           // -1 => loop forces a full paint once NTP lands
+  if (!have0) { struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; } }   // clock once synced
 }
 
 void loop() {
