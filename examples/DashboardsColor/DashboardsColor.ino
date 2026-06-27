@@ -107,8 +107,8 @@ static void render() {
   display.setCursor(16, 18); display.print(LOC);
   text(PANEL_W - tw(2, DATESTR) - 16, 22, 2, GxEPD_WHITE, DATESTR);
 
-  // analog clock (left)
-  clock(232, 290, 188, hh, mm);
+  // analog clock (left) — vertically centered in the band between the header (58) and footer (440)
+  clock(232, 248, 188, hh, mm);
 
   // right column: outdoor + indoor cards
   const int X = 452, W = PANEL_W - X - 12;
