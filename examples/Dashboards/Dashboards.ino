@@ -67,6 +67,18 @@ int lcClk[4];      // {x, y, w, h}
 String lcValStr[4];     // last value string drawn in each box (to skip unchanged ones)
 bool   lcValDirty[4];   // did box i change since the last draw?
 
+// Classic Mac face: dirty-tracked partial regions — clock, date, the two sunken fields, battery.
+// Each window is generous (covers the whole field) so shrinking text on the white desktop fully
+// clears. White-on-black inverts vs LCARS but partials still project crisply (level 0 black, 3 white).
+String macStr[5]; bool macDirty[5];
+static const int macWin[5][4] = {
+  {240,  78, 320,  82},   // 0 clock (centered HH:MM, size 10)
+  { 40, 188, 720,  30},   // 1 date band (centered, variable width)
+  { 46, 286, 328, 112},   // 2 outdoor field interior (value + sub)
+  {406, 286, 328, 112},   // 3 indoor field interior
+  {636, 436, 158,  26},   // 4 battery
+};
+
 static const char* weatherText(int c) {
   if (c < 0) return "";
   if (c == 0) return "Clear"; if (c <= 3) return "Cloudy"; if (c <= 48) return "Fog";
@@ -285,11 +297,13 @@ static void renderMac(const struct tm& t) {
   cv.fillRect((PANEL_W - tw) / 2 - 12, 22, tw + 24, 32, 3);   // clear box for the title
   tprint((PANEL_W - tw) / 2, 30, 2, 0, "reTerminal");
   cv.fillRect(34, 30, 16, 16, 3); cv.drawRect(34, 30, 16, 16, 0);   // close box
-  // clock centred
-  String hm = hhmm(t); int cw = twidth(10, hm);
+  // clock centred ("--:--" until NTP, like the LCARS face)
+  String hm = validTime(t) ? hhmm(t) : "--:--"; int cw = twidth(10, hm);
   tprint((PANEL_W - cw) / 2, 84, 10, 0, hm);
-  char d[40]; strftime(d, sizeof d, "%A, %d %B %Y", &t);
+  macDirty[0] = (hm != macStr[0]); macStr[0] = hm;
+  char d[40]; if (validTime(t)) strftime(d, sizeof d, "%A, %d %B %Y", &t); else strcpy(d, "Waiting for time...");
   int dw = twidth(2, d); tprint((PANEL_W - dw) / 2, 196, 2, 0, d);
+  macDirty[1] = (String(d) != macStr[1]); macStr[1] = d;
   // two sunken fields
   for (int i = 0; i < 2; i++) {
     int x = 44 + i * 360, y = 248, w = 332, h = 150;
@@ -301,8 +315,12 @@ static void renderMac(const struct tm& t) {
     tprint(x + 14, y + 52, 5, 0, big);
     String sub = i == 0 ? String(weatherText(wcode)) : (isnan(inH) ? "" : String((int)inH) + "% RH");
     tprint(x + 14, y + 116, 2, 0, sub);
+    String comp = big + "|" + sub;                            // field dirty if either line changed
+    macDirty[2 + i] = (comp != macStr[2 + i]); macStr[2 + i] = comp;
   }
-  tprint(PANEL_W - 150, PANEL_H - 36, 2, 0, "Batt " + String(io.batteryPercent()) + "%");
+  String batt = "Batt " + String(io.batteryPercent()) + "%";
+  tprint(PANEL_W - 150, PANEL_H - 36, 2, 0, batt);
+  macDirty[4] = (batt != macStr[4]); macStr[4] = batt;
 }
 
 // ============================== LINUX CONSOLE ==============================
@@ -578,15 +596,21 @@ static void draw(const struct tm& t, bool full) {
   if (io.readSHT4x(inT, inH)) {} else { inT = NAN; inH = NAN; }
   if (style == 1) renderMac(t); else if (style == 2) renderConsole(t); else renderLCARS(t);
   memcpy(epd.buffer(), cv.getBuffer(), (size_t)PANEL_W * PANEL_H);   // canvas levels -> panel buffer
-  if (full || style != 0) {
-    epd.displayFull();                                              // crisp 4-gray full page
-  } else {
-    // LCARS off-minute: quick 1-bit partials — only the data values that CHANGED, plus the clock,
-    // each centered about its text so the refresh border sits symmetrically. No full-page flash.
-    // All windows are white-on-black only, so the B&W partial projection never blackens any gray.
-    for (int i = 0; i < 4; i++) if (lcValDirty[i])             // skip values that didn't change
+  if (full) { epd.displayFull(); return; }                          // crisp 4-gray full page (clears ghosting)
+
+  // Off-minute: each face owns a dirty-tracked partial cadence — refresh only what changed.
+  if (style == 0) {
+    // LCARS: the data values that CHANGED + the clock, each centered about its text so the refresh
+    // border sits symmetrically. White-on-black windows only, so B&W projection never blackens gray.
+    for (int i = 0; i < 4; i++) if (lcValDirty[i])
       epd.partial(lcVal[i][0], lcVal[i][1], lcVal[i][2], lcVal[i][3]);
-    epd.partial(lcClk[0], lcClk[1], lcClk[2], lcClk[3]);       // clock refreshes every minute
+    epd.partial(lcClk[0], lcClk[1], lcClk[2], lcClk[3]);
+  } else if (style == 1) {
+    // Classic Mac: calm — partial just the clock, date, the two fields, and battery when they change.
+    for (int i = 0; i < 5; i++) if (macDirty[i])
+      epd.partial(macWin[i][0], macWin[i][1], macWin[i][2], macWin[i][3]);
+  } else {
+    epd.displayFull();                                              // Console: full for now (Phase 2 next)
   }
 }
 
