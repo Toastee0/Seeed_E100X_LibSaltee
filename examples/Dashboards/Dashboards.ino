@@ -42,6 +42,7 @@ String cfgSsid = "", cfgPass = "";
 String cfgLoc  = "Toronto";              // shown on the LCARS rail
 float  cfgLat  = 43.6532f, cfgLon = -79.3832f;
 String cfgTz   = "EST5EDT,M3.2.0,M11.1.0";
+String cfgCity = "";                      // a typed city name still pending online geocoding ("" = none)
 
 Mono epd;
 Peripherals io;
@@ -74,8 +75,9 @@ static void fetchWeather() {
   HTTPClient http;
   String url = "https://api.open-meteo.com/v1/forecast?latitude=" + String(cfgLat, 4) +
                "&longitude=" + String(cfgLon, 4) + "&current=temperature_2m,relative_humidity_2m,weather_code";
-  if (!http.begin(client, url)) return;
-  if (http.GET() == 200) {
+  if (!http.begin(client, url)) { Serial.println("weather: begin() failed"); return; }
+  int code = http.GET();
+  if (code == 200) {
     String b = http.getString();
     int c = b.indexOf("\"current\":"); if (c < 0) c = 0;       // skip the "current_units" block
     int ti = b.indexOf("\"temperature_2m\":", c), hi = b.indexOf("\"relative_humidity_2m\":", c), wi = b.indexOf("\"weather_code\":", c);
@@ -83,7 +85,101 @@ static void fetchWeather() {
     if (hi >= 0) outHum  = b.substring(hi + 23).toFloat();
     if (wi >= 0) wcode  = b.substring(wi + 15).toInt();
   }
+  Serial.printf("weather: %.4f,%.4f http=%d -> %.1fC %.0f%% code=%d\n",
+                cfgLat, cfgLon, code, outTemp, outHum, wcode);
   http.end();
+}
+
+// ---- tiny JSON field readers (indexOf-based, matching fetchWeather's no-library style) ----
+static String urlEncode(const String& s) {
+  static const char* H = "0123456789ABCDEF"; String o;
+  for (size_t i = 0; i < s.length(); i++) {
+    char ch = s[i];
+    if (isalnum((unsigned char)ch) || ch == '-' || ch == '_' || ch == '.' || ch == '~') o += ch;
+    else { o += '%'; o += H[(ch >> 4) & 0xF]; o += H[ch & 0xF]; }
+  }
+  return o;
+}
+static String jsonStr(const String& b, const char* key, int from = 0) {   // key incl. quotes, e.g. "\"timezone\""
+  int k = b.indexOf(key, from); if (k < 0) return "";
+  int c = b.indexOf(':', k + strlen(key)); if (c < 0) return "";
+  int q = b.indexOf('"', c + 1); if (q < 0) return "";
+  int e = b.indexOf('"', q + 1); if (e < 0) return "";
+  return b.substring(q + 1, e);
+}
+static float jsonNum(const String& b, const char* key, int from = 0) {
+  int k = b.indexOf(key, from); if (k < 0) return NAN;
+  int c = b.indexOf(':', k + strlen(key)); if (c < 0) return NAN;
+  return b.substring(c + 1).toFloat();
+}
+static String ianaToPosix(const String& iana) {
+  for (int i = 0; i < REGION_NTZMAP; i++) if (iana == REGION_TZMAP[i].iana) return REGION_TZMAP[i].posix;
+  return "";
+}
+
+// Resolve a typed city NAME to lat/long (+ a DST-correct POSIX TZ where known) using the Open-Meteo
+// geocoder. Runs at boot, AFTER WiFi is up — at portal time the device has no internet yet. On a hit
+// it fills cfgLat/cfgLon/cfgLoc/cfgTz and returns true; cfgTz is left "auto" if the zone is unmapped.
+static bool geocodeCity(const String& name) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  WiFiClientSecure client; client.setInsecure();
+  HTTPClient http;
+  String url = "https://geocoding-api.open-meteo.com/v1/search?name=" + urlEncode(name) +
+               "&count=1&language=en&format=json";
+  if (!http.begin(client, url)) return false;
+  int code = http.GET(); bool ok = false;
+  if (code == 200) {
+    String b = http.getString();
+    int r = b.indexOf("\"results\"");
+    if (r >= 0) {
+      float la = jsonNum(b, "\"latitude\"", r), lo = jsonNum(b, "\"longitude\"", r);
+      if (!isnan(la) && !isnan(lo)) {
+        cfgLat = la; cfgLon = lo;
+        String nm = jsonStr(b, "\"name\"", r); if (nm.length()) cfgLoc = nm;
+        String iana = jsonStr(b, "\"timezone\"", r);
+        String p = ianaToPosix(iana); cfgTz = p.length() ? p : "auto";
+        ok = true;
+      }
+    }
+  }
+  Serial.printf("geocode '%s' http=%d ok=%d -> %.4f,%.4f tz=%s\n",
+                name.c_str(), code, ok, cfgLat, cfgLon, cfgTz.c_str());
+  http.end();
+  return ok;
+}
+
+// Derive a POSIX TZ for the current lat/long via the forecast API's timezone=auto (used when a city
+// was geolocated by the browser, or a typed city's zone isn't in the map). Prefers a DST-correct
+// mapped POSIX string; otherwise synthesizes a fixed-offset zone from utc_offset_seconds.
+static bool resolveTZAuto() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  WiFiClientSecure client; client.setInsecure();
+  HTTPClient http;
+  String url = "https://api.open-meteo.com/v1/forecast?latitude=" + String(cfgLat, 4) +
+               "&longitude=" + String(cfgLon, 4) + "&current=temperature_2m&timezone=auto";
+  if (!http.begin(client, url)) return false;
+  int code = http.GET(); bool ok = false;
+  if (code == 200) {
+    String b = http.getString();
+    String iana = jsonStr(b, "\"timezone\"");
+    String p = ianaToPosix(iana);
+    if (p.length()) { cfgTz = p; ok = true; }
+    else {
+      float off = jsonNum(b, "\"utc_offset_seconds\"");
+      String ab = jsonStr(b, "\"timezone_abbreviation\"");
+      if (!isnan(off)) {
+        int sh = (int)off / 3600, sm = (abs((int)off) % 3600) / 60;   // POSIX offset has the OPPOSITE sign
+        char buf[24];
+        const char* nm = ab.length() ? ab.c_str() : "UTC";
+        if (sm) snprintf(buf, sizeof buf, "%s%d:%02d", nm, -sh, sm);
+        else    snprintf(buf, sizeof buf, "%s%d", nm, -sh);
+        cfgTz = buf; ok = true;
+      }
+    }
+  }
+  Serial.printf("tzAuto http=%d ok=%d -> %s\n", code, ok, cfgTz.c_str());
+  http.end();
+  return ok;
 }
 
 // ---- small gray-draw helpers on the canvas ----
@@ -237,7 +333,26 @@ static void loadConfig() {
   cfgLat  = prefs.getFloat ("lat",  43.6532f);
   cfgLon  = prefs.getFloat ("lon",  -79.3832f);
   cfgTz   = prefs.getString("tz",   "EST5EDT,M3.2.0,M11.1.0");
+  cfgCity = prefs.getString("city", "");
   prefs.end();
+}
+
+// Persist location values resolved at boot (geocode / tz-auto) so later boots skip the lookups.
+static void saveResolved() {
+  prefs.begin("dash", false);
+  prefs.putFloat ("lat",  cfgLat); prefs.putFloat ("lon", cfgLon);
+  prefs.putString("loc",  cfgLoc); prefs.putString("tz",  cfgTz);
+  prefs.putString("city", cfgCity);
+  prefs.end();
+}
+
+// One-time online resolution after WiFi is up: turn a typed city name into coordinates, and turn a
+// still-"auto" timezone into a concrete POSIX TZ. Both are cached back to NVS so this only runs once.
+static void resolveLocation() {
+  bool dirty = false;
+  if (cfgCity.length()) { if (geocodeCity(cfgCity)) { cfgCity = ""; dirty = true; } }
+  if (cfgTz == "auto")  { if (resolveTZAuto())       dirty = true; }
+  if (dirty) saveResolved();
 }
 
 // ============================== LCARS onboarding screens ==============================
@@ -275,7 +390,7 @@ static void screenSetup() {                                   // SoftAP up: how 
   const int P0 = 88, PH = 52, PG = 4;
   lcarsPip(P0 + 0 * (PH + PG), PH, 2, "MODE",   "SETUP");
   lcarsPip(P0 + 1 * (PH + PG), PH, 3, "RADIO",  "HOTSPOT");
-  lcarsPip(P0 + 2 * (PH + PG), PH, 1, "SECURE", "OPEN");
+  lcarsPip(P0 + 2 * (PH + PG), PH, 1, "SECURITY:", "OPEN");
   lcarsPip(P0 + 3 * (PH + PG), PH, 3, "PORTAL", "1.4.1");
   String lines[] = {
     "1. On your phone,",
@@ -329,12 +444,16 @@ static String formPage() {
   int n = WiFi.scanNetworks();
   for (int i = 0; i < n; i++) s += "<option>" + WiFi.SSID(i) + "</option>";
   s += F("</select><label>WiFi password</label><input name=pass type=password>"
-         "<label>Location (for weather &amp; clock)</label>"
+         "<h3 style='color:#f90;margin:18px 0 4px'>Location</h3>"
+         "<p class=hint>For weather &amp; the clock &mdash; use any one of these:</p>"
+         "<button type=button id=geo>Use my current location</button>"
+         "<p id=geostat class=hint>Your phone may ask permission. If it's blocked, just type a city.</p>"
+         "<label>Type a city</label><input name=cityname placeholder='e.g. Paris, Tokyo, Denver'>"
+         "<label>...or pick from the list</label>"
          "<select name=city onchange=\"document.getElementById('custom').style.display="
-         "this.value=='custom'?'block':'none'\"><option value=''>-- pick a city --</option>");
+         "this.value=='custom'?'block':'none'\"><option value=''>-- choose --</option>");
   for (int i = 0; i < REGION_NCITIES; i++)
-    s += "<option value=" + String(i) + (String(REGION_CITIES[i].name) == cfgLoc ? " selected" : "") +
-         ">" + REGION_CITIES[i].name + "</option>";
+    s += "<option value=" + String(i) + ">" + REGION_CITIES[i].name + "</option>";
   s += F("<option value=custom>Custom (enter lat/long)...</option></select>"
          "<div id=custom><label>Place name</label><input name=loc>"
          "<label>Latitude</label><input name=lat type=number step=any placeholder='43.65'>"
@@ -344,16 +463,36 @@ static String formPage() {
   for (int i = 0; i < REGION_NZONES; i++)
     s += "<option value=" + String(i) + ">" + REGION_ZONES[i].label + "</option>";
   s += F("</select></div>"
-         "<button type=submit>Save &amp; connect</button></form>");
+         "<input type=hidden name=usegeo value=''>"
+         "<button type=submit>Save &amp; connect</button></form>"
+         "<script>document.getElementById('geo').onclick=function(){"
+         "var s=document.getElementById('geostat');"
+         "if(!navigator.geolocation){s.textContent='Geolocation not supported here.';return;}"
+         "s.textContent='Requesting location...';"
+         "navigator.geolocation.getCurrentPosition(function(p){"
+         "document.querySelector('[name=lat]').value=p.coords.latitude.toFixed(4);"
+         "document.querySelector('[name=lon]').value=p.coords.longitude.toFixed(4);"
+         "document.querySelector('[name=usegeo]').value='1';"
+         "s.textContent='Location set: '+p.coords.latitude.toFixed(3)+', '+p.coords.longitude.toFixed(3)+'. Tap Save.';"
+         "},function(e){s.textContent='Could not get location: '+e.message+'. Type a city instead.';});"
+         "};</script>");
   return s;
 }
 
 static void handleSave() {
   String ssid = web.arg("ssid"), pass = web.arg("pass");
-  // Location: a chosen city fills lat/long + TZ from the table; "custom" uses the typed fields.
+  // Location precedence: browser geolocation > typed city (geocoded at boot) > preset city > custom.
+  // "auto" TZ means "resolve it online once connected" (see resolveLocation()).
   String loc = cfgLoc, tz = cfgTz; float lat = cfgLat, lon = cfgLon;
+  String pendingCity = "";
+  String useGeo = web.arg("usegeo"), glat = web.arg("lat"), glon = web.arg("lon");
+  String cityname = web.arg("cityname"); cityname.trim();
   String city = web.arg("city");
-  if (city.length() && city != "custom") {
+  if (useGeo == "1" && glat.length() && glon.length()) {
+    lat = glat.toFloat(); lon = glon.toFloat(); loc = "My location"; tz = "auto";
+  } else if (cityname.length()) {
+    pendingCity = cityname; loc = cityname; tz = "auto";          // lat/long resolved at boot
+  } else if (city.length() && city != "custom") {
     int i = city.toInt();
     if (i >= 0 && i < REGION_NCITIES) {
       loc = REGION_CITIES[i].name; lat = REGION_CITIES[i].lat;
@@ -361,7 +500,7 @@ static void handleSave() {
     }
   } else if (city == "custom") {
     loc = web.arg("loc"); if (!loc.length()) loc = "Custom";
-    lat = web.arg("lat").toFloat(); lon = web.arg("lon").toFloat();
+    lat = glat.toFloat(); lon = glon.toFloat();
     int z = web.arg("tz").toInt();
     if (z >= 0 && z < REGION_NZONES) tz = REGION_ZONES[z].tz;
   }
@@ -369,7 +508,10 @@ static void handleSave() {
   prefs.putString("ssid", ssid); prefs.putString("pass", pass);
   prefs.putString("loc",  loc);  prefs.putFloat("lat", lat);
   prefs.putFloat ("lon",  lon);  prefs.putString("tz",  tz);
+  prefs.putString("city", pendingCity);
   prefs.end();
+  Serial.printf("saved: ssid=%s loc=%s lat=%.4f lon=%.4f tz=%s pending=%s\n",
+                ssid.c_str(), loc.c_str(), lat, lon, tz.c_str(), pendingCity.c_str());
   web.send(200, "text/html",
            F("<meta name=viewport content='width=device-width'><body style='font-family:system-ui;"
              "background:#000;color:#fc9;text-align:center;margin-top:60px'>"
@@ -424,7 +566,9 @@ void setup() {
   for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
   if (WiFi.status() != WL_CONNECTED) { screenFailed(cfgSsid); delay(1500); startPortal(); return; }
 
-  configTzTime(cfgTz.c_str(), NTP_SERVER, "time.nist.gov");
+  resolveLocation();                                          // geocode a typed city / resolve "auto" TZ (online)
+  const char* tzApply = (cfgTz == "auto") ? "UTC0" : cfgTz.c_str();
+  configTzTime(tzApply, NTP_SERVER, "time.nist.gov");
   fetchWeather(); lastWeather = millis();
   struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; }
 }
@@ -440,7 +584,11 @@ void loop() {
   if (millis() - lastWeather >= WEATHER_EVERY_MS) { fetchWeather(); lastWeather = millis(); }
   if (change || t.tm_min != lastMin) {
     // LCARS: quick partials every minute, clean full page every 10 min (and on style/refresh).
-    draw(t, forceFull || (t.tm_min % 10 == 0));
+    // The very first paint MUST be full: if setup() couldn't draw (NTP not synced within its 8s
+    // window, common right after onboarding), the panel still shows the CONNECTING screen — a
+    // partial would only patch the value/clock boxes and leave that chrome behind.
+    bool firstPaint = (lastMin == -1);
+    draw(t, forceFull || firstPaint || (t.tm_min % 10 == 0));
     lastMin = t.tm_min;
   }
   delay(50);
