@@ -89,11 +89,19 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 | **HelloColor** | the six inks + live SHT4x reading on the E1002. Needs GxEPD2. |
 | **ThinClient** | fetch an 800×480 gray frame from *your* server and partial-refresh only what changed — render server-side, change the UI with no reflash. |
 | **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
+| **Dashboards** | the same self-contained data rendered three ways in one sketch — **LCARS** (TNG), **Classic Mac**, **Linux console** — LEFT/RIGHT cycle the style. The LCARS view is pictured below. |
 | **NetScan** | hourly "seen any sign of life lately" map of the device's own /24 (no extra library) — ICMP **and** ARP (catches hosts that block ping), wakes/scans/full-refreshes/deep-sleeps each hour, RTC-backed seen-state. Two modes (toggle with the REFRESH button): a **labeled** grid (live-streamed per row) and a **4-level-gray heatmap** that darkens a cell the longer since it was last seen (2 h/shade, black at 6 h). |
 | **PCMonitor** | parse a Windows PC's **LibreHardwareMonitor** JSON on-device → live CPU/GPU temps, partial-refreshed. See [`docs/PC_MONITOR.md`](docs/PC_MONITOR.md). |
 | **Dashboard** | a config-driven **widget engine** — boxes, bars, values, text, QR — each with a bounding box + fast-refresh flag, designed in a browser (`extras/dashboard.html`). See [`docs/WIDGETS.md`](docs/WIDGETS.md). |
 | **WiFiQR** | a "scan to join my WiFi" QR, generated **on-device** from the credentials it already knows (`WiFi.SSID()`/`WiFi.psk()`) — uses the ESP32 core's built-in QR encoder, no extra library. |
 | **WiFiSetup** | **no-code, no-serial onboarding**: captive-portal WiFi setup with on-screen status + a QR to join the device's setup hotspot. Hold Refresh at boot to re-provision. |
+
+![The Dashboards example (LCARS style) on the reTerminal E1001](docs/img/dashboards-lcars.jpg)
+
+*The **Dashboards** example in **LCARS** style: a one-piece top bar carrying the column headers over
+live indoor/outdoor temperature + humidity, a "connected to HQ" sync line sharing the chrono row, a
+full-height status rail (location, weather, chrono, WiFi RSSI/SSID, battery, node IP), and a centered
+NTP clock. LEFT/RIGHT cycle to the Classic Mac and Linux-console styles — all four-level grayscale.*
 
 ### Gallery (on the E1001)
 
