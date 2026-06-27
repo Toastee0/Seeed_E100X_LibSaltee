@@ -188,6 +188,7 @@ static void tprint(int x, int y, uint8_t size, uint8_t lvl, const String& s) {
 }
 static int twidth(uint8_t size, const String& s) { return s.length() * 6 * size; }
 static String hhmm(const struct tm& t) { char b[8]; strftime(b, sizeof b, "%H:%M", &t); return b; }
+static bool validTime(const struct tm& t) { return t.tm_year >= 120; }   // >= year 2020 == NTP has synced
 
 // ============================== LCARS ==============================
 static const int RAIL_W = 170;   // left-rail / tab width (horizontal proportions unchanged)
@@ -245,11 +246,11 @@ static void renderLCARS(const struct tm& t) {
   }
   // --- HQ bar: same row as the chrono tab, contiguous with it (like the header row + brand cap) ---
   cv.fillRoundRect(SB - 40, chronoY, PANEL_W - (SB - 40) - 8, PH, 14, 1);   // starts inside the rail (same shade)
-  char sy[16]; strftime(sy, sizeof sy, "%d-%m-%y", &t);        // date only, no time
+  char sy[16]; if (validTime(t)) strftime(sy, sizeof sy, "%d-%m-%y", &t); else strcpy(sy, "--");   // "--" until NTP
   cv.setTextColor(3); cv.setTextSize(2); cv.setCursor(MX + 16, chronoY + (PH - 16) / 2 - 1);
   cv.print(String("connected to hq: via ") + NTP_SERVER + "  " + sy);
   // --- big clock, centered in the open region below the HQ bar ---
-  String hm = hhmm(t);
+  String hm = validTime(t) ? hhmm(t) : "--:--";               // placeholder before the first NTP sync
   cv.setTextColor(3); cv.setTextSize(13);
   int clkX = MX + (MW - twidth(13, hm)) / 2;                   // center horizontally in the right region
   int clkY = (chronoY + PH + PANEL_H - 13 * 8) / 2;          // center vertically below the HQ bar
@@ -568,9 +569,17 @@ void setup() {
 
   resolveLocation();                                          // geocode a typed city / resolve "auto" TZ (online)
   const char* tzApply = (cfgTz == "auto") ? "UTC0" : cfgTz.c_str();
-  configTzTime(tzApply, NTP_SERVER, "time.nist.gov");
-  fetchWeather(); lastWeather = millis();
-  struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; }
+  configTzTime(tzApply, NTP_SERVER, "time.nist.gov");         // kick off NTP (non-blocking)
+
+  // Show the dashboard immediately — don't sit on the CONNECTING screen waiting for NTP/weather.
+  // The clock/date render as "--" until the first sync; values fill in as data arrives.
+  struct tm t0; bool have0 = getLocalTime(&t0, 0);
+  draw(t0, true);                                             // dashboard on screen NOW (placeholders)
+  lastMin = have0 ? t0.tm_min : -1;                           // -1 => loop forces a full paint once NTP lands
+
+  fetchWeather(); lastWeather = millis();                     // fetch while we wait for the clock
+  struct tm t;
+  if (getLocalTime(&t, have0 ? 0 : 8000)) { draw(t, true); lastMin = t.tm_min; }   // real time + fresh weather
 }
 
 void loop() {
