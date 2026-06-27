@@ -85,7 +85,7 @@ bands for you (optionally leaving the top *N* rows untouched if you keep gray ch
 
 | Example | What it shows |
 |---|---|
-| **HelloMono** | titled grayscale screen + a block that steps across a band via fast partials. Needs Adafruit GFX. |
+| **HelloGrayScale** | four labelled gray swatches (black/dark/light/white) + an SD card bouncing DVD-style via fast partial refresh (only the union of its old+new position is redrawn). Needs Adafruit GFX. |
 | **HelloColor** | the six inks + live SHT4x reading on the E1002. Needs GxEPD2. |
 | **ThinClient** | fetch an 800×480 gray frame from *your* server and partial-refresh only what changed — render server-side, change the UI with no reflash. |
 | **StandaloneDashboard** | self-contained: NTP clock + Open-Meteo weather + on-board SHT4x + battery %, no server. |
