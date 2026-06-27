@@ -24,6 +24,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
+#include <ArduinoOTA.h>
 #include <time.h>
 #include <Adafruit_GFX.h>
 #include <ReTerminalMono.h>
@@ -43,6 +44,9 @@ String cfgLoc  = "Toronto";              // shown on the LCARS rail
 float  cfgLat  = 43.6532f, cfgLon = -79.3832f;
 String cfgTz   = "EST5EDT,M3.2.0,M11.1.0";
 String cfgCity = "";                      // a typed city name still pending online geocoding ("" = none)
+bool   cfgOta  = false;                    // wireless (OTA) firmware updates enabled at enrollment?
+String cfgOtaPass = "";                    // user-chosen OTA password (no default — OTA off without one)
+bool   cfgOtaShow = false;                 // show the OTA password on the local e-paper screen?
 
 Mono epd;
 Peripherals io;
@@ -52,6 +56,7 @@ WebServer  web(80);
 DNSServer  dns;
 String     apName;                        // SoftAP SSID shown during onboarding
 bool       g_portal = false;              // true while the captive setup portal is running
+bool       g_ota = false;                 // ArduinoOTA is running (enrolled WITH a password)
 
 float outTemp = NAN; float outHum = NAN; int wcode = -1; float inT = NAN, inH = NAN;
 int style = 0, lastMin = -1; uint32_t lastWeather = 0;
@@ -335,6 +340,9 @@ static void loadConfig() {
   cfgLon  = prefs.getFloat ("lon",  -79.3832f);
   cfgTz   = prefs.getString("tz",   "EST5EDT,M3.2.0,M11.1.0");
   cfgCity = prefs.getString("city", "");
+  cfgOta  = prefs.getBool  ("ota", false);
+  cfgOtaPass = prefs.getString("otapass", "");
+  cfgOtaShow = prefs.getBool("otashow", false);
   prefs.end();
 }
 
@@ -439,7 +447,9 @@ static String formPage() {
                "button{width:100%;font-size:1.1em;padding:12px;margin:18px 0;border:0;border-radius:18px;"
                "background:#f90;color:#000;font-weight:700}"
                ".hint{color:#888;font-size:.82em;margin:2px 0}"
-               "#custom{display:none}</style>"
+               ".chk{display:flex;align-items:center;color:#fc9;font-weight:400;margin:10px 0}"
+               ".chk input{width:auto;margin:0 8px 0 0}"
+               "#custom,#otapw{display:none}</style>"
                "<h2>reTerminal WiFi setup</h2><form method=POST action=/save>"
                "<label>Your WiFi network</label><select name=ssid>");
   int n = WiFi.scanNetworks();
@@ -465,6 +475,15 @@ static String formPage() {
     s += "<option value=" + String(i) + ">" + REGION_ZONES[i].label + "</option>";
   s += F("</select></div>"
          "<input type=hidden name=usegeo value=''>"
+         "<h3 style='color:#f90;margin:18px 0 4px'>Wireless updates (optional)</h3>"
+         "<label class=chk><input type=checkbox name=ota value=1 onchange=\""
+         "document.getElementById('otapw').style.display=this.checked?'block':'none'\">"
+         " Update this firmware over WiFi (OTA)</label>"
+         "<div id=otapw><label>OTA password</label>"
+         "<input name=otapass type=text autocomplete=off placeholder='choose your own'>"
+         "<label class=chk><input type=checkbox name=otashow value=1> Show this password on the display</label>"
+         "<p class=hint>Lets the Arduino IDE flash new firmware over WiFi (network port). "
+         "Used only if enabled &mdash; there is no default password.</p></div>"
          "<button type=submit>Save &amp; connect</button></form>"
          "<script>document.getElementById('geo').onclick=function(){"
          "var s=document.getElementById('geostat');"
@@ -510,9 +529,12 @@ static void handleSave() {
   prefs.putString("loc",  loc);  prefs.putFloat("lat", lat);
   prefs.putFloat ("lon",  lon);  prefs.putString("tz",  tz);
   prefs.putString("city", pendingCity);
+  prefs.putBool  ("ota",  web.hasArg("ota"));          // checkbox present == ticked
+  prefs.putString("otapass", web.arg("otapass"));      // user-chosen; no default ever
+  prefs.putBool  ("otashow", web.hasArg("otashow"));   // show it on the local screen?
   prefs.end();
-  Serial.printf("saved: ssid=%s loc=%s lat=%.4f lon=%.4f tz=%s pending=%s\n",
-                ssid.c_str(), loc.c_str(), lat, lon, tz.c_str(), pendingCity.c_str());
+  Serial.printf("saved: ssid=%s loc=%s lat=%.4f lon=%.4f tz=%s pending=%s ota=%d\n",
+                ssid.c_str(), loc.c_str(), lat, lon, tz.c_str(), pendingCity.c_str(), web.hasArg("ota"));
   web.send(200, "text/html",
            F("<meta name=viewport content='width=device-width'><body style='font-family:system-ui;"
              "background:#000;color:#fc9;text-align:center;margin-top:60px'>"
@@ -532,6 +554,41 @@ static void startPortal() {
   web.on("/save", HTTP_POST, handleSave);
   web.begin();
   screenSetup();                                               // tell the user what to do, on-screen
+}
+
+// ============================== OTA (optional wireless updates) ==============================
+// An LCARS screen that shows the OTA host + password on the panel (opt-in via "show on display").
+// Only whoever is physically at the device can read it.
+static void screenOTAInfo() {
+  lcChrome("OTA ENABLED");
+  const int P0 = 88, PH = 52, PG = 4;
+  lcarsPip(P0 + 0 * (PH + PG), PH, 2, "UPDATES", "ON");
+  lcarsPip(P0 + 1 * (PH + PG), PH, 3, "NET PORT", "3232");
+  String lines[] = { "Wireless firmware", "updates are ON.", "",
+                     "Host: " + apName, "Password:", "   " + cfgOtaPass };
+  lcBody(lines, 6);
+  lcFooter("Arduino IDE -> Port -> network port. Shown here for you only.");
+  lcFlush();
+}
+
+// Bring up ArduinoOTA iff enrollment enabled it AND set a password (never a default/blank password).
+static void beginOTA() {
+  if (!cfgOta || !cfgOtaPass.length()) return;
+  ArduinoOTA.setHostname(apName.c_str());
+  ArduinoOTA.setPassword(cfgOtaPass.c_str());
+  ArduinoOTA.onStart([] {
+    lcChrome("OTA UPDATE");
+    String l[] = { "Receiving new", "firmware...", "", "Do not power off." };
+    lcBody(l, 4); lcFlush();
+  });
+  ArduinoOTA.onError([](ota_error_t) {
+    lcChrome("OTA FAILED");
+    String l[] = { "Update error.", "Rebooting..." };
+    lcBody(l, 2); lcFlush();
+  });
+  ArduinoOTA.begin();
+  g_ota = true;
+  Serial.printf("OTA enabled: host=%s port=3232\n", apName.c_str());
 }
 
 static void draw(const struct tm& t, bool full) {
@@ -576,15 +633,18 @@ void setup() {
   // inside draw(), so the very first paint already carries outdoor weather AND indoor temp/hum —
   // only the clock waits on NTP, showing "--:--" until it syncs.
   fetchWeather(); lastWeather = millis();
+  beginOTA();                                                // optional wireless updates (quick to start)
+  if (g_ota && cfgOtaShow) { screenOTAInfo(); delay(4500); } // opt-in: flash the OTA password on the panel
 
   struct tm t0; bool have0 = getLocalTime(&t0, 0);
-  draw(t0, true);                                             // dashboard on screen NOW: data present, clock "--:--"
+  draw(t0, true);                                            // dashboard on screen NOW: data present, clock "--:--"
   lastMin = have0 ? t0.tm_min : -1;                           // -1 => loop forces a full paint once NTP lands
   if (!have0) { struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; } }   // clock once synced
 }
 
 void loop() {
   if (g_portal) { dns.processNextRequest(); web.handleClient(); return; }   // onboarding: just serve the portal
+  if (g_ota) ArduinoOTA.handle();                                           // service wireless updates, if enabled
   bool change = false, forceFull = false;
   if (io.leftPressed())  { style = (style + 2) % 3; change = true; forceFull = true; }
   if (io.rightPressed()) { style = (style + 1) % 3; change = true; forceFull = true; }
