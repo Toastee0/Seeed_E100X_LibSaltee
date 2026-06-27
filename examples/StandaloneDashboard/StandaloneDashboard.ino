@@ -48,8 +48,11 @@ static void fetchWeather() {
   if (!http.begin(client, url)) return;
   if (http.GET() == 200) {
     String b = http.getString();
-    int ti = b.indexOf("\"temperature_2m\":");
-    int wi = b.indexOf("\"weather_code\":");
+    // Search inside the "current" object — the response also has a "current_units" block first whose
+    // temperature_2m / weather_code values are strings ("°C" / "wmo code"), which would parse to 0.
+    int c = b.indexOf("\"current\":"); if (c < 0) c = 0;
+    int ti = b.indexOf("\"temperature_2m\":", c);
+    int wi = b.indexOf("\"weather_code\":", c);
     if (ti >= 0) outTemp = b.substring(ti + 17).toFloat();
     if (wi >= 0) wcode  = b.substring(wi + 15).toInt();
   }
