@@ -6,7 +6,7 @@
 //   2  CONSOLE  — Linux terminal: black CRT, monospace "status" output in a box-drawn frame
 //
 // LEFT/RIGHT cycle the style; REFRESH forces a clean full refresh. LCARS updates with quick 1-bit
-// partials per minute (one tight box per data value + the clock) and a clean 4-gray full page every 10 min.
+// partials per minute (the clock + any data value that changed) and a clean 4-gray full page every 10 min.
 // Drawing goes into a GFXcanvas8
 // (1 byte/pixel) using gray levels 0(black)..3(white), then is copied to the panel buffer — so we get
 // Adafruit_GFX rounded-rects and text in true grayscale. Fill in WIFI_SSID/WIFI_PASS + LAT/LONG.
@@ -39,6 +39,8 @@ int style = 0, lastMin = -1; uint32_t lastWeather = 0;
 // clock, each vertically centered about its text so the partial-refresh border sits symmetrically.
 int lcVal[4][4];   // [i] = {x, y, w, h}
 int lcClk[4];      // {x, y, w, h}
+String lcValStr[4];     // last value string drawn in each box (to skip unchanged ones)
+bool   lcValDirty[4];   // did box i change since the last draw?
 
 static const char* weatherText(int c) {
   if (c < 0) return "";
@@ -124,6 +126,7 @@ static void renderLCARS(const struct tm& t) {
     // quick-refresh window: tight box per value, vertically centered about its glyph
     lcVal[i][0] = vx - vPadX;          lcVal[i][1] = valY - vPadY;
     lcVal[i][2] = vw + 2 * vPadX;      lcVal[i][3] = vGlyphH + 2 * vPadY;
+    lcValDirty[i] = (val[i] != lcValStr[i]); lcValStr[i] = val[i];   // only this changed since last draw?
   }
   // --- HQ bar: same row as the chrono tab, contiguous with it (like the header row + brand cap) ---
   cv.fillRoundRect(SB - 40, chronoY, PANEL_W - (SB - 40) - 8, PH, 14, 1);   // starts inside the rail (same shade)
@@ -213,11 +216,12 @@ static void draw(const struct tm& t, bool full) {
   if (full || style != 0) {
     epd.displayFull();                                              // crisp 4-gray full page
   } else {
-    // LCARS off-minute: quick 1-bit partials — one tight box per data value + the clock, each
-    // centered about its text so the refresh border sits symmetrically. No full-page flash.
+    // LCARS off-minute: quick 1-bit partials — only the data values that CHANGED, plus the clock,
+    // each centered about its text so the refresh border sits symmetrically. No full-page flash.
     // All windows are white-on-black only, so the B&W partial projection never blackens any gray.
-    for (int i = 0; i < 4; i++) epd.partial(lcVal[i][0], lcVal[i][1], lcVal[i][2], lcVal[i][3]);
-    epd.partial(lcClk[0], lcClk[1], lcClk[2], lcClk[3]);
+    for (int i = 0; i < 4; i++) if (lcValDirty[i])             // skip values that didn't change
+      epd.partial(lcVal[i][0], lcVal[i][1], lcVal[i][2], lcVal[i][3]);
+    epd.partial(lcClk[0], lcClk[1], lcClk[2], lcClk[3]);       // clock refreshes every minute
   }
 }
 
