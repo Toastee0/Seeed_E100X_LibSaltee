@@ -63,7 +63,6 @@ DNSServer  dns;
 String     apName;                        // SoftAP SSID shown during onboarding
 bool       g_portal = false;              // true while the captive setup portal is running
 bool       g_ota = false;                 // ArduinoOTA is running (enrolled WITH a password)
-bool       g_maint = false;               // maintenance mode (hold LEFT at boot): stay awake + WiFi + OTA
 
 // Render-time network/battery values. Renders read THESE (not live WiFi/battery) so they work with
 // the radio off and are reproducible — the deep-sleep partial reconstruct re-renders the prior frame.
@@ -727,25 +726,28 @@ static void goToSleep() {
   esp_deep_sleep_start();
 }
 
-// Always-on dev path (hold LEFT at power-on): connect, enable OTA, run the live dashboard in loop().
-static void enterMaintenance() {
-  g_maint = true;
-  screenConnecting(cfgSsid);
+// REFRESH while asleep: bring WiFi up, refresh weather/NTP/battery, and hold an OTA window open for
+// ~60s so firmware can be pushed over the air (otherwise WiFi is only up briefly every 15 min). If an
+// OTA is pushed, ArduinoOTA.handle() runs it and reboots — we never reach sleep. So no special boot
+// mode is needed: a button press IS the maintenance/OTA window.
+static void otaRefreshWindow() {
+  uint32_t t0 = millis();
   WiFi.mode(WIFI_STA);
   WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
   WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
-  for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
-  if (WiFi.status() != WL_CONNECTED) { screenFailed(cfgSsid); delay(1500); startPortal(); return; }
-  resolveLocation();
-  configTzTime((cfgTz == "auto") ? "UTC0" : cfgTz.c_str(), NTP_SERVER, "time.nist.gov");
-  fetchWeather(); lastWeather = millis();
-  updateNetLive();
-  beginOTA();
-  if (g_ota && cfgOtaShow) { screenOTAInfo(); delay(4500); }
-  struct tm t0; bool have0 = getLocalTime(&t0, 0);
-  draw(t0, true); lastMin = have0 ? t0.tm_min : -1;
-  if (!have0) { struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; } }
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(100); Serial.print('.'); }
+  if (WiFi.status() == WL_CONNECTED) {
+    configTzTime((cfgTz == "auto") ? "UTC0" : cfgTz.c_str(), NTP_SERVER, "time.nist.gov");
+    fetchWeather(); updateNetLive(); saveNetToRtc();
+    rtc.lastWeather = (uint32_t)time(nullptr);
+    beginOTA();
+    Serial.println("REFRESH: WiFi up, OTA window open ~60s — push firmware now");
+    while (millis() - t0 < 60000) { ArduinoOTA.handle(); delay(20); }   // OTA, if pushed, blocks + reboots
+  } else {
+    Serial.println("REFRESH: WiFi connect failed");
+  }
+  WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
 }
 
 void setup() {
@@ -763,10 +765,8 @@ void setup() {
   // Cold-boot button holds: no creds / REFRESH -> re-onboard; LEFT -> maintenance (stay awake + OTA).
   if (!fromSleep) {
     bool refreshHeld = (digitalRead(PIN_BTN_REFRESH) == LOW);
-    bool leftHeld    = (digitalRead(PIN_BTN_LEFT)    == LOW);
-    if (!cfgSsid.length() || refreshHeld) { startPortal(); return; }
-    if (leftHeld) { enterMaintenance(); return; }
-  } else if (!cfgSsid.length()) { startPortal(); return; }   // safety: lost config -> onboard
+    if (!cfgSsid.length() || refreshHeld) { startPortal(); return; }   // no creds / REFRESH held -> re-onboard
+  } else if (!cfgSsid.length()) { startPortal(); return; }             // safety: lost config -> onboard
 
   if (!fromSleep || rtc.magic != RTC_MAGIC) {
     // Cold start: initialise RTC state, one WiFi window (connect/NTP/weather/battery), full render.
@@ -780,16 +780,17 @@ void setup() {
     // Woke from sleep (timer or button).
     style = rtc.style;
     loadNetFromRtc();
-    bool forceFull = false;
+    bool forceFull = false, refreshWin = false;
     if (cause == ESP_SLEEP_WAKEUP_EXT1) {
       uint64_t wk = esp_sleep_get_ext1_wakeup_status();      // which button woke us (reliable even if released)
       if (wk & (1ULL << PIN_BTN_LEFT))       { style = (style + 2) % 3; forceFull = true; }
       else if (wk & (1ULL << PIN_BTN_RIGHT)) { style = (style + 1) % 3; forceFull = true; }
-      else                                   { forceFull = true; }   // REFRESH -> clean full refresh
+      else                                   { forceFull = true; refreshWin = true; }   // REFRESH -> full + OTA window
     }
     time_t now = time(nullptr);
     bool weatherDue = (rtc.lastWeather == 0) || ((uint32_t)now - rtc.lastWeather >= WEATHER_EVERY_S);
-    if (weatherDue) { wifiWindow(false); loadNetFromRtc(); forceFull = true; }
+    if (refreshWin)      { otaRefreshWindow(); loadNetFromRtc(); forceFull = true; }   // REFRESH: weather + OTA window
+    else if (weatherDue) { wifiWindow(false);  loadNetFromRtc(); forceFull = true; }   // scheduled 15-min window
     readIndoor();
     struct tm t; getLocalTime(&t, 0);
     if (forceFull || ++rtc.partialsSinceFull >= 12) {        // anti-ghost: a clean full at least every ~12 min
@@ -803,22 +804,7 @@ void setup() {
 }
 
 void loop() {
-  // Battery mode deep-sleeps in setup() and never reaches loop(). Only the portal and maintenance
-  // (always-on) modes run here.
-  if (g_portal) { dns.processNextRequest(); web.handleClient(); return; }
-  if (!g_maint) { delay(100); return; }
-  if (g_ota) ArduinoOTA.handle();
-  bool change = false, forceFull = false;
-  if (io.leftPressed())  { style = (style + 2) % 3; change = true; forceFull = true; }
-  if (io.rightPressed()) { style = (style + 1) % 3; change = true; forceFull = true; }
-  if (io.refreshPressed()) { change = true; forceFull = true; }
-  struct tm t;
-  if (!getLocalTime(&t, 500)) { delay(50); return; }
-  if (millis() - lastWeather >= WEATHER_EVERY_MS) { fetchWeather(); updateNetLive(); lastWeather = millis(); }
-  if (change || t.tm_min != lastMin) {
-    bool firstPaint = (lastMin == -1);
-    draw(t, forceFull || firstPaint || (t.tm_min % 10 == 0));
-    lastMin = t.tm_min;
-  }
-  delay(50);
+  // Battery mode deep-sleeps in setup() and never reaches loop(); only the onboarding portal runs here.
+  if (g_portal) { dns.processNextRequest(); web.handleClient(); }
+  else delay(100);
 }
