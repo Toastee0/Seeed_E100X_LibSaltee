@@ -26,6 +26,8 @@
 #include <Preferences.h>
 #include <ArduinoOTA.h>
 #include <time.h>
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
 #include <Adafruit_GFX.h>
 #include <ReTerminalMono.h>
 #include <ReTerminalQR.h>
@@ -61,6 +63,26 @@ DNSServer  dns;
 String     apName;                        // SoftAP SSID shown during onboarding
 bool       g_portal = false;              // true while the captive setup portal is running
 bool       g_ota = false;                 // ArduinoOTA is running (enrolled WITH a password)
+bool       g_maint = false;               // maintenance mode (hold LEFT at boot): stay awake + WiFi + OTA
+
+// Render-time network/battery values. Renders read THESE (not live WiFi/battery) so they work with
+// the radio off and are reproducible — the deep-sleep partial reconstruct re-renders the prior frame.
+// Set live during a WiFi window; otherwise restored from RTC memory across deep sleep.
+long   netRSSI = 0; String netSSID = ""; String netIP = "0.0.0.0"; int battPct = 0;
+
+// ---- battery deep-sleep duty cycle ----
+const uint32_t SLEEP_SECONDS   = 60;          // wake every minute to update clock + indoor temp
+const uint32_t WEATHER_EVERY_S = 15 * 60;     // bring WiFi up this often for weather/NTP/battery
+const uint64_t BTN_MASK = (1ULL << PIN_BTN_REFRESH) | (1ULL << PIN_BTN_LEFT) | (1ULL << PIN_BTN_RIGHT);
+#define RTC_MAGIC 0xDA54B001u
+// Survives deep sleep (RTC slow memory); RAM and the driver's on-glass snapshot do not.
+RTC_DATA_ATTR struct {
+  uint32_t magic; int style;
+  float outTemp, outHum; int wcode; uint32_t lastWeather;   // last WiFi window (epoch)
+  float lastInT; uint32_t lastShown;                        // last displayed indoor temp + minute (epoch)
+  int battPct; long rssi; char ssid[33]; char ip[16];       // last-known network/battery
+  uint16_t partialsSinceFull;                               // anti-ghost counter
+} rtc;
 
 float outTemp = NAN; float outHum = NAN; int wcode = -1; float inT = NAN, inH = NAN;
 int style = 0, lastMin = -1; uint32_t lastWeather = 0;
@@ -280,14 +302,14 @@ static void renderLCARS(const struct tm& t) {
     lcClk[0] = clkX - cpadX;            lcClk[1] = clkY - cpadY;
     lcClk[2] = twidth(13, hm) + 2 * cpadX; lcClk[3] = cgh + 2 * cpadY; }
   // --- left rail pips: 7 tabs evenly filling from the cap down to the bottom edge ---
-  long rssi = WiFi.RSSI();
+  long rssi = netRSSI;
   lcarsPip(P0 + 0 * (PH + PG), PH, 2, "Location:",  cfgLoc);
   lcarsPip(P0 + 1 * (PH + PG), PH, 3, "Weather:",   weatherText(wcode));
   lcarsPip(P0 + 2 * (PH + PG), PH, 1, "Chrono:",    "RTC/NTP");
   lcarsPip(P0 + 3 * (PH + PG), PH, 3, "WiFi RSSI:", String(rssi) + " db");
-  lcarsPip(P0 + 4 * (PH + PG), PH, 2, "WiFi SSID:", WiFi.SSID());
-  lcarsPip(P0 + 5 * (PH + PG), PH, 3, "Battery:",   String(io.batteryPercent()) + " %");   // single % only
-  lcarsPip(P0 + 6 * (PH + PG), PH, 1, "Node IP:",   WiFi.localIP().toString());
+  lcarsPip(P0 + 4 * (PH + PG), PH, 2, "WiFi SSID:", netSSID);
+  lcarsPip(P0 + 5 * (PH + PG), PH, 3, "Battery:",   String(battPct) + " %");   // single % only
+  lcarsPip(P0 + 6 * (PH + PG), PH, 1, "Node IP:",   netIP);
 }
 
 // ============================== CLASSIC MAC ==============================
@@ -322,7 +344,7 @@ static void renderMac(const struct tm& t) {
     String comp = big + "|" + sub;                            // field dirty if either line changed
     macDirty[2 + i] = (comp != macStr[2 + i]); macStr[2 + i] = comp;
   }
-  String batt = "Batt " + String(io.batteryPercent()) + "%";
+  String batt = "Batt " + String(battPct) + "%";
   tprint(PANEL_W - 150, PANEL_H - 36, 2, 0, batt);
   macDirty[4] = (batt != macStr[4]); macStr[4] = batt;
 }
@@ -346,7 +368,7 @@ static void renderConsole(const struct tm& t) {
   snprintf(ln, sizeof ln, "time     %s", dt); tprint(16, y, 2, FG, ln); y += LH;
   snprintf(ln, sizeof ln, "outdoor  %s C   %s", isnan(outTemp) ? "--" : String(outTemp, 1).c_str(), weatherText(wcode)); tprint(16, y, 2, FG, ln); y += LH;
   snprintf(ln, sizeof ln, "indoor   %s C   %s%% RH", isnan(inT) ? "--" : String(inT, 1).c_str(), isnan(inH) ? "--" : String((int)inH).c_str()); tprint(16, y, 2, FG, ln); y += LH;
-  snprintf(ln, sizeof ln, "battery  %d%%", io.batteryPercent()); tprint(16, y, 2, FG, ln); y += LH;
+  snprintf(ln, sizeof ln, "battery  %d%%", battPct); tprint(16, y, 2, FG, ln); y += LH;
   snprintf(ln, sizeof ln, "uptime   %lu min", millis() / 60000); tprint(16, y, 2, DIM, ln); y += LH + 8;
   tprint(16, y, 2, FG, "admin@re-terminal:~$");
   cv.fillRect(16 + twidth(2, "admin@re-terminal:~$ "), y, 13, 22, FG);   // cursor block
@@ -618,62 +640,182 @@ static void draw(const struct tm& t, bool full) {
   }
 }
 
+// ============================== battery deep-sleep helpers ==============================
+static void micOff() { pinMode(PIN_MIC_EN, OUTPUT); digitalWrite(PIN_MIC_EN, LOW); }   // force the PDM mic rail off
+
+static void readIndoor() {                                   // SHT4x indoor temp/hum (self-heating corrected)
+  if (io.readSHT4x(inT, inH)) { inT -= INDOOR_TEMP_OFFSET; } else { inT = NAN; inH = NAN; }
+}
+static void renderStyle(const struct tm& t) {
+  if (style == 1) renderMac(t); else if (style == 2) renderConsole(t); else renderLCARS(t);
+}
+static void renderInto(const struct tm& t) {                 // render the current style into the panel buffer (no refresh)
+  renderStyle(t); memcpy(epd.buffer(), cv.getBuffer(), (size_t)PANEL_W * PANEL_H);
+}
+static void loadNetFromRtc() {
+  netRSSI = rtc.rssi; netSSID = String(rtc.ssid); netIP = String(rtc.ip); battPct = rtc.battPct;
+  outTemp = rtc.outTemp; outHum = rtc.outHum; wcode = rtc.wcode;
+}
+static void saveNetToRtc() {
+  rtc.rssi = netRSSI; rtc.battPct = battPct;
+  rtc.outTemp = outTemp; rtc.outHum = outHum; rtc.wcode = wcode;
+  strncpy(rtc.ssid, netSSID.c_str(), sizeof rtc.ssid - 1); rtc.ssid[sizeof rtc.ssid - 1] = 0;
+  strncpy(rtc.ip,   netIP.c_str(),   sizeof rtc.ip   - 1); rtc.ip[sizeof rtc.ip   - 1] = 0;
+}
+static void updateNetLive() {                                // capture live WiFi/battery into the render globals
+  netRSSI = WiFi.RSSI(); netSSID = WiFi.SSID(); netIP = WiFi.localIP().toString(); battPct = io.batteryPercent(true);
+}
+
+// Bring WiFi up briefly: connect to the strongest AP, (re)sync NTP, fetch weather + battery + network
+// info, persist to RTC, then power the radio back down. Returns true if it connected.
+static bool wifiWindow(bool firstTime) {
+  uint32_t t0 = millis();
+  WiFi.mode(WIFI_STA);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) { delay(200); Serial.print('.'); }
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  if (ok) {
+    if (firstTime) resolveLocation();                        // geocode a typed city / resolve "auto" TZ
+    configTzTime((cfgTz == "auto") ? "UTC0" : cfgTz.c_str(), NTP_SERVER, "time.nist.gov");
+    if (firstTime) { struct tm t; getLocalTime(&t, 8000); }  // wait for the first NTP sync (RTC then holds it)
+    fetchWeather();
+    updateNetLive();
+    saveNetToRtc();
+    Serial.printf("wifi window ok: rssi=%ld ssid=%s ip=%s out=%.1f/%.0f batt=%d\n",
+                  netRSSI, netSSID.c_str(), netIP.c_str(), outTemp, outHum, battPct);
+  } else {
+    Serial.println("wifi window: connect failed");
+  }
+  rtc.lastWeather = (uint32_t)time(nullptr);                 // schedule next window from now (success or fail)
+  WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
+  return ok;
+}
+
+// A partial update across deep sleep: the driver's on-glass snapshot is gone, so first re-render the
+// PRIOR frame (old minute + old indoor temp) and declare it as the snapshot, then render the new frame
+// and partial-refresh only the regions that differ (clock + indoor temp). Console has no partial
+// windows, so it falls back to a full refresh.
+static void partialUpdate(const struct tm& t) {
+  struct tm told; time_t ls = (time_t)rtc.lastShown; localtime_r(&ls, &told);
+  float newInT = inT; inT = rtc.lastInT;
+  renderInto(told); epd.syncSnapshot();                      // declare: glass == this (prior) frame
+  inT = newInT;
+  renderInto(t);                                             // dirty flags now reflect new-vs-old
+  if (style == 0) {
+    for (int i = 0; i < 4; i++) if (lcValDirty[i]) epd.partial(lcVal[i][0], lcVal[i][1], lcVal[i][2], lcVal[i][3]);
+    epd.partial(lcClk[0], lcClk[1], lcClk[2], lcClk[3]);
+  } else if (style == 1) {
+    for (int i = 0; i < 5; i++) if (macDirty[i]) epd.partial(macWin[i][0], macWin[i][1], macWin[i][2], macWin[i][3]);
+  } else {
+    epd.displayFull();
+  }
+}
+
+// Power the panel down and deep-sleep: wake on the minute timer or any of the three buttons (ext1).
+static void goToSleep() {
+  rtc.style = style;
+  epd.sleep();                                               // panel retains its image with no power
+  rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_REFRESH); rtc_gpio_pulldown_dis((gpio_num_t)PIN_BTN_REFRESH);
+  rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_LEFT);    rtc_gpio_pulldown_dis((gpio_num_t)PIN_BTN_LEFT);
+  rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_RIGHT);   rtc_gpio_pulldown_dis((gpio_num_t)PIN_BTN_RIGHT);
+  esp_sleep_enable_ext1_wakeup(BTN_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL);
+  WiFi.mode(WIFI_OFF);
+  Serial.printf("deep sleep %us (or button)\n", SLEEP_SECONDS); Serial.flush();
+  esp_deep_sleep_start();
+}
+
+// Always-on dev path (hold LEFT at power-on): connect, enable OTA, run the live dashboard in loop().
+static void enterMaintenance() {
+  g_maint = true;
+  screenConnecting(cfgSsid);
+  WiFi.mode(WIFI_STA);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+  for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
+  if (WiFi.status() != WL_CONNECTED) { screenFailed(cfgSsid); delay(1500); startPortal(); return; }
+  resolveLocation();
+  configTzTime((cfgTz == "auto") ? "UTC0" : cfgTz.c_str(), NTP_SERVER, "time.nist.gov");
+  fetchWeather(); lastWeather = millis();
+  updateNetLive();
+  beginOTA();
+  if (g_ota && cfgOtaShow) { screenOTAInfo(); delay(4500); }
+  struct tm t0; bool have0 = getLocalTime(&t0, 0);
+  draw(t0, true); lastMin = have0 ? t0.tm_min : -1;
+  if (!have0) { struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; } }
+}
+
 void setup() {
   Serial.begin(115200); delay(200);
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  bool fromSleep = (cause == ESP_SLEEP_WAKEUP_TIMER || cause == ESP_SLEEP_WAKEUP_EXT1);
   io.begin();
+  micOff();
   if (!epd.begin()) { Serial.println("PSRAM alloc failed — enable OPI PSRAM"); while (true) delay(1000); }
 
   uint8_t mac[6]; WiFi.macAddress(mac);
   apName = "reTerminal-" + String(mac[4], HEX) + String(mac[5], HEX);
   loadConfig();
-  bool forceSetup = (digitalRead(PIN_BTN_REFRESH) == LOW);     // hold Refresh at boot to re-onboard
 
-  if (!cfgSsid.length() || forceSetup) { startPortal(); return; }   // no creds / forced -> onboarding
+  // Cold-boot button holds: no creds / REFRESH -> re-onboard; LEFT -> maintenance (stay awake + OTA).
+  if (!fromSleep) {
+    bool refreshHeld = (digitalRead(PIN_BTN_REFRESH) == LOW);
+    bool leftHeld    = (digitalRead(PIN_BTN_LEFT)    == LOW);
+    if (!cfgSsid.length() || refreshHeld) { startPortal(); return; }
+    if (leftHeld) { enterMaintenance(); return; }
+  } else if (!cfgSsid.length()) { startPortal(); return; }   // safety: lost config -> onboard
 
-  screenConnecting(cfgSsid);
-  WiFi.mode(WIFI_STA);
-  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);       // scan every channel, then...
-  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);   // ...join the STRONGEST AP for this SSID, not just the
-                                                   // first one found. On mesh/multi-AP networks the default
-                                                   // fast-scan can latch onto a weak node — a poor link still
-                                                   // passes ping/weather but starves a sustained OTA transfer.
-  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
-  for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; i++) { delay(250); Serial.print('.'); }
-  if (WiFi.status() != WL_CONNECTED) { screenFailed(cfgSsid); delay(1500); startPortal(); return; }
-
-  resolveLocation();                                          // geocode a typed city / resolve "auto" TZ (online)
-  const char* tzApply = (cfgTz == "auto") ? "UTC0" : cfgTz.c_str();
-  configTzTime(tzApply, NTP_SERVER, "time.nist.gov");         // kick off NTP (non-blocking)
-
-  // Fetch weather BEFORE the first paint. A full refresh is ~4s and blocks, so painting first would
-  // strand the weather fetch behind it (that was the temp/humidity lag). The SHT4x indoor read runs
-  // inside draw(), so the very first paint already carries outdoor weather AND indoor temp/hum —
-  // only the clock waits on NTP, showing "--:--" until it syncs.
-  fetchWeather(); lastWeather = millis();
-  beginOTA();                                                // optional wireless updates (quick to start)
-  if (g_ota && cfgOtaShow) { screenOTAInfo(); delay(4500); } // opt-in: flash the OTA password on the panel
-
-  struct tm t0; bool have0 = getLocalTime(&t0, 0);
-  draw(t0, true);                                            // dashboard on screen NOW: data present, clock "--:--"
-  lastMin = have0 ? t0.tm_min : -1;                           // -1 => loop forces a full paint once NTP lands
-  if (!have0) { struct tm t; if (getLocalTime(&t, 8000)) { draw(t, true); lastMin = t.tm_min; } }   // clock once synced
+  if (!fromSleep || rtc.magic != RTC_MAGIC) {
+    // Cold start: initialise RTC state, one WiFi window (connect/NTP/weather/battery), full render.
+    memset(&rtc, 0, sizeof rtc); rtc.magic = RTC_MAGIC; style = 0;
+    screenConnecting(cfgSsid);
+    wifiWindow(true);
+    struct tm t; getLocalTime(&t, 0);
+    draw(t, true);                                            // reads SHT4x + full render
+    rtc.lastShown = (uint32_t)time(nullptr); rtc.lastInT = inT; rtc.partialsSinceFull = 0;
+  } else {
+    // Woke from sleep (timer or button).
+    style = rtc.style;
+    loadNetFromRtc();
+    bool forceFull = false;
+    if (cause == ESP_SLEEP_WAKEUP_EXT1) {
+      uint64_t wk = esp_sleep_get_ext1_wakeup_status();      // which button woke us (reliable even if released)
+      if (wk & (1ULL << PIN_BTN_LEFT))       { style = (style + 2) % 3; forceFull = true; }
+      else if (wk & (1ULL << PIN_BTN_RIGHT)) { style = (style + 1) % 3; forceFull = true; }
+      else                                   { forceFull = true; }   // REFRESH -> clean full refresh
+    }
+    time_t now = time(nullptr);
+    bool weatherDue = (rtc.lastWeather == 0) || ((uint32_t)now - rtc.lastWeather >= WEATHER_EVERY_S);
+    if (weatherDue) { wifiWindow(false); loadNetFromRtc(); forceFull = true; }
+    readIndoor();
+    struct tm t; getLocalTime(&t, 0);
+    if (forceFull || ++rtc.partialsSinceFull >= 12) {        // anti-ghost: a clean full at least every ~12 min
+      draw(t, true); rtc.partialsSinceFull = 0;
+    } else {
+      partialUpdate(t);
+    }
+    rtc.lastShown = (uint32_t)time(nullptr); rtc.lastInT = inT;
+  }
+  goToSleep();                                                // never returns
 }
 
 void loop() {
-  if (g_portal) { dns.processNextRequest(); web.handleClient(); return; }   // onboarding: just serve the portal
-  if (g_ota) ArduinoOTA.handle();                                           // service wireless updates, if enabled
+  // Battery mode deep-sleeps in setup() and never reaches loop(). Only the portal and maintenance
+  // (always-on) modes run here.
+  if (g_portal) { dns.processNextRequest(); web.handleClient(); return; }
+  if (!g_maint) { delay(100); return; }
+  if (g_ota) ArduinoOTA.handle();
   bool change = false, forceFull = false;
   if (io.leftPressed())  { style = (style + 2) % 3; change = true; forceFull = true; }
   if (io.rightPressed()) { style = (style + 1) % 3; change = true; forceFull = true; }
   if (io.refreshPressed()) { change = true; forceFull = true; }
   struct tm t;
   if (!getLocalTime(&t, 500)) { delay(50); return; }
-  if (millis() - lastWeather >= WEATHER_EVERY_MS) { fetchWeather(); lastWeather = millis(); }
+  if (millis() - lastWeather >= WEATHER_EVERY_MS) { fetchWeather(); updateNetLive(); lastWeather = millis(); }
   if (change || t.tm_min != lastMin) {
-    // LCARS: quick partials every minute, clean full page every 10 min (and on style/refresh).
-    // The very first paint MUST be full: if setup() couldn't draw (NTP not synced within its 8s
-    // window, common right after onboarding), the panel still shows the CONNECTING screen — a
-    // partial would only patch the value/clock boxes and leave that chrome behind.
     bool firstPaint = (lastMin == -1);
     draw(t, forceFull || firstPaint || (t.tm_min % 10 == 0));
     lastMin = t.tm_min;
