@@ -81,6 +81,7 @@ RTC_DATA_ATTR struct {
   float lastInT; uint32_t lastShown;                        // last displayed indoor temp + minute (epoch)
   int battPct; long rssi; char ssid[33]; char ip[16];       // last-known network/battery
   uint16_t partialsSinceFull;                               // anti-ghost counter
+  uint8_t lowBatt;                                          // battery < 5% at the last read -> show charge screen
 } rtc;
 
 float outTemp = NAN; float outHum = NAN; int wcode = -1; float inT = NAN, inH = NAN;
@@ -681,6 +682,7 @@ static bool wifiWindow(bool firstTime) {
     if (firstTime) { struct tm t; getLocalTime(&t, 8000); }  // wait for the first NTP sync (RTC then holds it)
     fetchWeather();
     updateNetLive();
+    rtc.lowBatt = (battPct < 5) ? 1 : 0;                     // flag critical battery (cleared once charged)
     saveNetToRtc();
     Serial.printf("wifi window ok: rssi=%ld ssid=%s ip=%s out=%.1f/%.0f batt=%d\n",
                   netRSSI, netSSID.c_str(), netIP.c_str(), outTemp, outHum, battPct);
@@ -712,6 +714,20 @@ static void partialUpdate(const struct tm& t) {
   }
 }
 
+// Critical-battery screen: a big battery glyph (nearly empty) + "PLEASE CHARGE". Shown when the
+// 15-min battery read finds < 5%, so the panel holds a clear charge prompt instead of the dashboard.
+static void screenLowBattery() {
+  lcChrome("LOW BATTERY");
+  const int bx = 250, by = 140, bw = 250, bh = 120;
+  for (int o = 0; o < 4; o++) cv.drawRect(bx + o, by + o, bw - 2 * o, bh - 2 * o, 3);   // thick white outline
+  cv.fillRect(bx + bw, by + bh / 2 - 22, 16, 44, 3);                                    // terminal nub
+  cv.fillRect(bx + 12, by + 12, 28, bh - 24, 3);                                        // small remaining charge
+  cv.setTextColor(3); cv.setTextSize(4);
+  cv.setCursor((PANEL_W - twidth(4, "PLEASE CHARGE")) / 2, 300); cv.print("PLEASE CHARGE");
+  lcFooter(String("Battery ") + battPct + "% - connect USB power");
+  lcFlush();
+}
+
 // Power the panel down and deep-sleep: wake on the minute timer or any of the three buttons (ext1).
 static void goToSleep() {
   rtc.style = style;
@@ -739,7 +755,7 @@ static void otaRefreshWindow() {
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(100); Serial.print('.'); }
   if (WiFi.status() == WL_CONNECTED) {
     configTzTime((cfgTz == "auto") ? "UTC0" : cfgTz.c_str(), NTP_SERVER, "time.nist.gov");
-    fetchWeather(); updateNetLive(); saveNetToRtc();
+    fetchWeather(); updateNetLive(); rtc.lowBatt = (battPct < 5) ? 1 : 0; saveNetToRtc();
     rtc.lastWeather = (uint32_t)time(nullptr);
     beginOTA();
     Serial.println("REFRESH: WiFi up, OTA window open ~60s — push firmware now");
@@ -774,7 +790,7 @@ void setup() {
     screenConnecting(cfgSsid);
     wifiWindow(true);
     struct tm t; getLocalTime(&t, 0);
-    draw(t, true);                                            // reads SHT4x + full render
+    if (rtc.lowBatt) screenLowBattery(); else draw(t, true); // charge prompt if critical, else full render
     rtc.lastShown = (uint32_t)time(nullptr); rtc.lastInT = inT; rtc.partialsSinceFull = 0;
   } else {
     // Woke from sleep (timer or button).
@@ -793,7 +809,9 @@ void setup() {
     else if (weatherDue) { wifiWindow(false);  loadNetFromRtc(); forceFull = true; }   // scheduled 15-min window
     readIndoor();
     struct tm t; getLocalTime(&t, 0);
-    if (forceFull || ++rtc.partialsSinceFull >= 12) {        // anti-ghost: a clean full at least every ~12 min
+    if (rtc.lowBatt) {
+      if (forceFull) screenLowBattery();                    // (re)draw on window/button wakes; timer wakes leave it up
+    } else if (forceFull || ++rtc.partialsSinceFull >= 12) { // anti-ghost: a clean full at least every ~12 min
       draw(t, true); rtc.partialsSinceFull = 0;
     } else {
       partialUpdate(t);
